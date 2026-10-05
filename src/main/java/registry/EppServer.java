@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class EppServer implements AutoCloseable {
     static final String NS_EPP = "urn:ietf:params:xml:ns:epp-1.0";
     static final String NS_DOMAIN = "urn:ietf:params:xml:ns:domain-1.0";
+    static final String NS_HOST = "urn:ietf:params:xml:ns:host-1.0";
     static final String NS_CONTACT = "urn:ietf:params:xml:ns:contact-1.0";
     static final String NS_RGP = "urn:ietf:params:xml:ns:rgp-1.0";
     private static final int MAX_FRAME = 1_048_576;
@@ -170,7 +171,10 @@ public final class EppServer implements AutoCloseable {
     private String greeting() {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><epp xmlns=\"" + NS_EPP + "\"><greeting>"
                 + "<svID>ccTLD registry prototype</svID><svDate>" + Instant.now(reg.clock()).truncatedTo(java.time.temporal.ChronoUnit.SECONDS) + "</svDate>"
-                + "<svcMenu><version>1.0</version><lang>en</lang><objURI>" + NS_DOMAIN + "</objURI><objURI>" + NS_CONTACT + "</objURI>"
+                + "<svcMenu><version>1.0</version><lang>en</lang>"
+                + "<objURI>" + NS_DOMAIN + "</objURI>"
+                + "<objURI>" + NS_HOST + "</objURI>"
+                + "<objURI>" + NS_CONTACT + "</objURI>"
                 + "<svcExtension><extURI>" + NS_RGP + "</extURI></svcExtension></svcMenu>"
                 + "<dcp><access><all/></access><statement><purpose><admin/><prov/></purpose><recipient><ours/><public/></recipient>"
                 + "<retention><stated/></retention></statement></dcp></greeting></epp>";
@@ -228,11 +232,24 @@ public final class EppServer implements AutoCloseable {
                 case "info": return domainInfo(st, obj, cl);
                 case "renew": return domainRenew(st, obj, cl);
                 case "delete": return domainDelete(st, obj, cl);
-                case "update": return domainRestore(st, obj, ext, cl);
+                case "update": return domainUpdate(st, obj, ext, cl);
                 default: break;
             }
-        } else if (NS_CONTACT.equals(obj.getNamespaceURI()) && name.equals("create")) {
-            return contactCreate(st, obj, cl);
+        } else if (NS_CONTACT.equals(obj.getNamespaceURI())) {
+            switch (name) {
+                case "check":
+                    return contactCheck(st, obj, cl);
+                case "create":
+                    return contactCreate(st, obj, cl);
+                case "info":
+                    return contactInfo(st, obj, cl);
+                case "update":
+                    return contactUpdate(st, obj, cl);
+                case "delete":
+                    return contactDelete(st, obj, cl);
+                default:
+                    break;
+            }
         }
         throw new RegistryException(2101, "Unimplemented command");
     }
@@ -341,6 +358,110 @@ public final class EppServer implements AutoCloseable {
                 : response(1001, "Command completed successfully; action pending", null, cl);
     }
 
+
+    private String domainUpdate(
+            Session st,
+            Element obj,
+            Element ext,
+            String cl
+    ) {
+        /*
+         * RFC 5731 domain:update.
+         *
+         * Supports:
+         *   domain:add/ns
+         *   domain:rem/ns
+         *   domain:chg/registrant
+         *
+         * RGP restore remains handled separately.
+         */
+
+        Element rgpUpdate =
+                ext == null ? null : kid(ext, "update");
+
+        Element restore =
+                rgpUpdate == null ? null : kid(rgpUpdate, "restore");
+
+        if (restore != null) {
+            return domainRestore(st, obj, ext, cl);
+        }
+
+        List<String> addNs = new ArrayList<>();
+        List<String> removeNs = new ArrayList<>();
+
+        Element add = kid(obj, "add");
+        Element rem = kid(obj, "rem");
+
+        if (add != null) {
+            Element ns = kid(add, "ns");
+
+            if (ns != null) {
+                for (Element h : kids(ns)) {
+                    if ("hostObj".equals(h.getLocalName()) ||
+                        "hostName".equals(h.getLocalName())) {
+
+                        String value = h.getTextContent().trim();
+
+                        if (!value.isEmpty()) {
+                            addNs.add(value);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (rem != null) {
+            Element ns = kid(rem, "ns");
+
+            if (ns != null) {
+                for (Element h : kids(ns)) {
+                    if ("hostObj".equals(h.getLocalName()) ||
+                        "hostName".equals(h.getLocalName())) {
+
+                        String value = h.getTextContent().trim();
+
+                        if (!value.isEmpty()) {
+                            removeNs.add(value);
+                        }
+                    }
+                }
+            }
+        }
+
+        String registrant = null;
+
+        Element chg = kid(obj, "chg");
+
+        if (chg != null) {
+            registrant = text(chg, "registrant");
+        }
+
+        if (addNs.isEmpty() &&
+            removeNs.isEmpty() &&
+            registrant == null) {
+
+            throw new RegistryException(
+                    2003,
+                    "Domain update contains no changes"
+            );
+        }
+
+        reg.updateDomain(
+                st.registrar,
+                need(obj, "name"),
+                registrant,
+                addNs,
+                removeNs
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
+    }
+
     private String domainRestore(Session st, Element obj, Element ext, String cl) {
         Element upd = ext == null ? null : kid(ext, "update");
         Element restore = upd == null ? null : kid(upd, "restore");
@@ -348,6 +469,496 @@ public final class EppServer implements AutoCloseable {
             throw new RegistryException(2101, "Unimplemented command: only RGP restore is supported for update");
         reg.restoreDomain(st.registrar, need(obj, "name"));
         return response(1000, "Command completed successfully", null, cl);
+    }
+
+    // ---------------------------------------------------------------- RFC 5732 HOST EPP
+
+    private String hostCheck(
+            Session st,
+            Element obj,
+            String cl) {
+
+        List<String> names = new ArrayList<>();
+
+        for (Element n : kids(obj)) {
+
+            if (!"name".equals(n.getLocalName())) {
+                continue;
+            }
+
+            names.add(n.getTextContent().trim());
+        }
+
+        if (names.isEmpty()) {
+            throw new RegistryException(
+                    2003,
+                    "Required parameter missing: name"
+            );
+        }
+
+        List<Registry.HostAvailability> result =
+                reg.checkHosts(st.registrar, names);
+
+        StringBuilder body =
+                new StringBuilder(
+                        "<resData><host:chkData xmlns:host=\""
+                                + NS_HOST
+                                + "\">"
+                );
+
+        for (Registry.HostAvailability a : result) {
+
+            body.append("<host:cd>")
+                    .append("<host:name avail=\"")
+                    .append(a.available() ? "1" : "0")
+                    .append("\">")
+                    .append(esc(a.name()))
+                    .append("</host:name>");
+
+            if (!a.available() && a.reason() != null) {
+                body.append("<host:reason>")
+                        .append(esc(a.reason()))
+                        .append("</host:reason>");
+            }
+
+            body.append("</host:cd>");
+        }
+
+        body.append("</host:chkData></resData>");
+
+        return response(
+                1000,
+                "Command completed successfully",
+                body.toString(),
+                cl
+        );
+    }
+
+
+    private String hostCreate(
+            Session st,
+            Element obj,
+            String cl) {
+
+        String name = need(obj, "name");
+
+        List<String> ipv4 = new ArrayList<>();
+        List<String> ipv6 = new ArrayList<>();
+
+        for (Element addr : kids(obj)) {
+
+            if (!"addr".equals(addr.getLocalName())) {
+                continue;
+            }
+
+            String value = addr.getTextContent().trim();
+
+            String ipVersion =
+                    addr.getAttribute("ip");
+
+            if ("v4".equalsIgnoreCase(ipVersion)) {
+                ipv4.add(value);
+
+            } else if ("v6".equalsIgnoreCase(ipVersion)) {
+                ipv6.add(value);
+
+            } else {
+                throw new RegistryException(
+                        2005,
+                        "Invalid host address IP version"
+                );
+            }
+        }
+
+        reg.createHost(
+                st.registrar,
+                name,
+                ipv4,
+                ipv6
+        );
+
+        String body =
+                "<resData>"
+                        + "<host:creData xmlns:host=\""
+                        + NS_HOST
+                        + "\">"
+                        + "<host:name>"
+                        + esc(name)
+                        + "</host:name>"
+                        + "<host:crDate>"
+                        + Instant.now(reg.clock())
+                        .truncatedTo(
+                                java.time.temporal.ChronoUnit.SECONDS
+                        )
+                        + "</host:crDate>"
+                        + "</host:creData>"
+                        + "</resData>";
+
+        return response(
+                1000,
+                "Command completed successfully",
+                body,
+                cl
+        );
+    }
+
+
+    private String hostInfo(
+            Session st,
+            Element obj,
+            String cl) {
+
+        String name = need(obj, "name");
+
+        Host host =
+                reg.hostInfo(
+                        st.registrar,
+                        name
+                );
+
+        StringBuilder body =
+                new StringBuilder(
+                        "<resData>"
+                                + "<host:infData xmlns:host=\""
+                                + NS_HOST
+                                + "\">"
+                                + "<host:name>"
+                                + esc(host.getName())
+                                + "</host:name>"
+                                + "<host:roid>"
+                                + esc(host.getName())
+                                + "</host:roid>"
+                );
+
+        for (String address : host.getIpv4()) {
+            body.append("<host:addr ip=\"v4\">")
+                    .append(esc(address))
+                    .append("</host:addr>");
+        }
+
+        for (String address : host.getIpv6()) {
+            body.append("<host:addr ip=\"v6\">")
+                    .append(esc(address))
+                    .append("</host:addr>");
+        }
+
+        body.append("<host:clID>")
+                .append(esc(host.getRegistrarId()))
+                .append("</host:clID>")
+                .append("</host:infData>")
+                .append("</resData>");
+
+        return response(
+                1000,
+                "Command completed successfully",
+                body.toString(),
+                cl
+        );
+    }
+
+
+    private String hostUpdate(
+            Session st,
+            Element obj,
+            String cl) {
+
+        String name = need(obj, "name");
+
+        List<String> addIpv4 = new ArrayList<>();
+        List<String> removeIpv4 = new ArrayList<>();
+
+        List<String> addIpv6 = new ArrayList<>();
+        List<String> removeIpv6 = new ArrayList<>();
+
+        Element add = kid(obj, "add");
+
+        if (add != null) {
+            parseHostAddresses(
+                    add,
+                    addIpv4,
+                    addIpv6
+            );
+        }
+
+        Element rem = kid(obj, "rem");
+
+        if (rem != null) {
+            parseHostAddresses(
+                    rem,
+                    removeIpv4,
+                    removeIpv6
+            );
+        }
+
+        reg.updateHost(
+                st.registrar,
+                name,
+                addIpv4,
+                removeIpv4,
+                addIpv6,
+                removeIpv6
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
+    }
+
+
+    private static void parseHostAddresses(
+            Element container,
+            List<String> ipv4,
+            List<String> ipv6) {
+
+        for (Element addr : kids(container)) {
+
+            if (!"addr".equals(addr.getLocalName())) {
+                continue;
+            }
+
+            String value =
+                    addr.getTextContent().trim();
+
+            String ip =
+                    addr.getAttribute("ip");
+
+            if ("v4".equalsIgnoreCase(ip)) {
+                ipv4.add(value);
+
+            } else if ("v6".equalsIgnoreCase(ip)) {
+                ipv6.add(value);
+
+            } else {
+                throw new RegistryException(
+                        2005,
+                        "Invalid host address IP version"
+                );
+            }
+        }
+    }
+
+
+    private String hostDelete(
+            Session st,
+            Element obj,
+            String cl) {
+
+        String name = need(obj, "name");
+
+        reg.deleteHost(
+                st.registrar,
+                name
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
+    }
+
+
+    private String contactCheck(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        List<String> ids = new ArrayList<>();
+
+        for (Element e : kids(obj)) {
+            if ("id".equals(e.getLocalName()))
+                ids.add(e.getTextContent().trim());
+        }
+
+        if (ids.isEmpty())
+            throw new RegistryException(
+                    2003,
+                    "Required parameter missing: id"
+            );
+
+        if (ids.size() > 50)
+            throw new RegistryException(
+                    2004,
+                    "At most 50 contact ids per check"
+            );
+
+        List<Registry.ContactAvailability> result =
+                reg.checkContacts(st.registrar, ids);
+
+        StringBuilder sb = new StringBuilder(
+                "<resData><contact:chkData xmlns:contact=\"" +
+                NS_CONTACT + "\">"
+        );
+
+        for (Registry.ContactAvailability a : result) {
+            sb.append("<contact:cd>")
+              .append("<contact:id avail=\"")
+              .append(a.available() ? "1" : "0")
+              .append("\">")
+              .append(esc(a.id()))
+              .append("</contact:id>");
+
+            if (!a.available() && a.reason() != null) {
+                sb.append("<contact:reason>")
+                  .append(esc(a.reason()))
+                  .append("</contact:reason>");
+            }
+
+            sb.append("</contact:cd>");
+        }
+
+        sb.append("</contact:chkData></resData>");
+
+        return response(
+                1000,
+                "Command completed successfully",
+                sb.toString(),
+                cl
+        );
+    }
+
+    private String contactInfo(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        Registry.ContactView v =
+                reg.contactInfo(
+                        st.registrar,
+                        need(obj, "id")
+                );
+
+        StringBuilder sb = new StringBuilder(
+                "<resData><contact:infData xmlns:contact=\"" +
+                NS_CONTACT + "\">"
+        );
+
+        sb.append("<contact:id>")
+          .append(esc(v.id()))
+          .append("</contact:id>");
+
+        sb.append("<contact:roid>")
+          .append(esc(v.id()))
+          .append("</contact:roid>");
+
+        sb.append("<contact:status s=\"ok\"/>");
+
+        sb.append("<contact:postalInfo type=\"loc\">")
+          .append("<contact:name>")
+          .append(esc(v.name()))
+          .append("</contact:name>");
+
+        if (v.org() != null && !v.org().isBlank()) {
+            sb.append("<contact:org>")
+              .append(esc(v.org()))
+              .append("</contact:org>");
+        }
+
+        sb.append("<contact:addr>")
+          .append("<contact:cc>")
+          .append(esc(v.country()))
+          .append("</contact:cc>")
+          .append("</contact:addr>")
+          .append("</contact:postalInfo>");
+
+        if (v.phone() != null && !v.phone().isBlank()) {
+            sb.append("<contact:voice>")
+              .append(esc(v.phone()))
+              .append("</contact:voice>");
+        }
+
+        sb.append("<contact:email>")
+          .append(esc(v.email()))
+          .append("</contact:email>");
+
+        sb.append("<contact:clID>")
+          .append(esc(v.sponsor()))
+          .append("</contact:clID>");
+
+        sb.append("<contact:crDate>")
+          .append(date(v.created()))
+          .append("</contact:crDate>");
+
+        sb.append("</contact:infData></resData>");
+
+        return response(
+                1000,
+                "Command completed successfully",
+                sb.toString(),
+                cl
+        );
+    }
+
+    private String contactUpdate(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        String id = need(obj, "id");
+
+        Element chg = kid(obj, "chg");
+
+        String name = null;
+        String org = null;
+        String email = null;
+        String phone = null;
+        String country = null;
+
+        if (chg != null) {
+            Element pi = kid(chg, "postalInfo");
+
+            if (pi != null) {
+                name = text(pi, "name");
+                org = text(pi, "org");
+
+                Element addr = kid(pi, "addr");
+
+                if (addr != null)
+                    country = text(addr, "cc");
+            }
+
+            email = text(chg, "email");
+            phone = text(chg, "voice");
+        }
+
+        reg.updateContact(
+                st.registrar,
+                id,
+                name,
+                org,
+                email,
+                phone,
+                country
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
+    }
+
+    private String contactDelete(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        reg.deleteContact(
+                st.registrar,
+                need(obj, "id")
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
     }
 
     private String contactCreate(Session st, Element obj, String cl) {

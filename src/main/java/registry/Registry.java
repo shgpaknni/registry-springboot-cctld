@@ -36,6 +36,19 @@ public final class Registry {
 
     private static final Pattern EMAIL = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
     private static final Pattern ID = Pattern.compile("^[A-Za-z0-9_-]{3,32}$");
+
+    /*
+     * RFC 5732 host/address validation.
+     *
+     * IPv4:
+     *     four decimal octets, each 0-255
+     *
+     * IPv6:
+     *     validated using java.net.InetAddress
+     */
+    private static final Pattern IPV4 =
+            Pattern.compile("^([0-9]{1,3}\\.){3}[0-9]{1,3}$");
+
     private static final SecureRandom RNG = new SecureRandom();
 
     private final Db db;
@@ -269,6 +282,727 @@ public final class Registry {
         });
     }
 
+    // ---------------------------------------------------------------- RFC 5732 HOST OBJECTS
+
+    /**
+     * RFC 5732 host object check.
+     */
+    public List<HostAvailability> checkHosts(
+            String registrar,
+            List<String> rawNames) {
+
+        requireRegistrarActive(registrar);
+
+        if (rawNames == null || rawNames.isEmpty()) {
+            throw new RegistryException(
+                    2003,
+                    "Required parameter missing: host name"
+            );
+        }
+
+        if (rawNames.size() > 50) {
+            throw new RegistryException(
+                    2004,
+                    "At most 50 hosts per check"
+            );
+        }
+
+        return read(c -> {
+            List<HostAvailability> result = new ArrayList<>();
+
+            for (String raw : rawNames) {
+                String name = Names.host(raw);
+
+                boolean exists = !rows(
+                        c,
+                        "SELECT 1 FROM hosts WHERE name=?",
+                        name
+                ).isEmpty();
+
+                result.add(
+                        new HostAvailability(
+                                name,
+                                !exists,
+                                exists ? "In use" : null
+                        )
+                );
+            }
+
+            return result;
+        });
+    }
+
+    public record HostAvailability(
+            String name,
+            boolean available,
+            String reason
+    ) {}
+
+    /**
+     * RFC 5732 host:create.
+     */
+    public void createHost(
+            String registrar,
+            String rawName,
+            List<String> ipv4,
+            List<String> ipv6) {
+
+        tx(c -> {
+
+            requireActive(c, registrar);
+
+            String name = Names.host(rawName);
+
+            validateHostAddresses(ipv4, ipv6);
+
+            /*
+             * RFC 5732:
+             * Only host objects that are subordinate to the
+             * sponsoring registrar's zone need glue addresses.
+             *
+             * For our ccTLD implementation, an in-zone host must
+             * carry at least one IP address.
+             */
+            boolean inZone =
+                    name.equals(cfg.zone())
+                    || name.endsWith("." + cfg.zone());
+
+            if (inZone &&
+                    (ipv4 == null || ipv4.isEmpty()) &&
+                    (ipv6 == null || ipv6.isEmpty())) {
+
+                throw new RegistryException(
+                        2003,
+                        "In-bailiwick host requires at least one address"
+                );
+            }
+
+            if (!rows(
+                    c,
+                    "SELECT 1 FROM hosts WHERE name=?",
+                    name
+            ).isEmpty()) {
+
+                throw new RegistryException(
+                        2302,
+                        "Host object exists"
+                );
+            }
+
+            long now = now();
+
+            update(
+                    c,
+                    """
+                    INSERT INTO hosts(
+                        name,
+                        registrar_id,
+                        created,
+                        updated
+                    )
+                    VALUES(?,?,?,?)
+                    """,
+                    name,
+                    registrar,
+                    now,
+                    now
+            );
+
+            insertHostAddresses(c, name, ipv4, 4);
+            insertHostAddresses(c, name, ipv6, 6);
+
+            audit(
+                    c,
+                    registrar,
+                    "HOST_CREATE",
+                    name,
+                    "ipv4=" + String.valueOf(ipv4)
+                            + ",ipv6="
+                            + String.valueOf(ipv6)
+            );
+
+            return null;
+        });
+    }
+
+    /**
+     * RFC 5732 host:info.
+     */
+    public Host hostInfo(
+            String registrar,
+            String rawName) {
+
+        return read(c -> {
+
+            requireActive(c, registrar);
+
+            String name = Names.host(rawName);
+
+            List<Object[]> hostRows = rows(
+                    c,
+                    """
+                    SELECT name, registrar_id
+                    FROM hosts
+                    WHERE name=?
+                    """,
+                    name
+            );
+
+            if (hostRows.isEmpty()) {
+                throw new RegistryException(
+                        2303,
+                        "Host object does not exist"
+                );
+            }
+
+            String sponsor =
+                    (String) hostRows.get(0)[1];
+
+            if (!registrar.equals(sponsor)) {
+                throw new RegistryException(
+                        2201,
+                        "Authorization error: not the sponsoring registrar"
+                );
+            }
+
+            List<String> ipv4 =
+                    hostAddresses(c, name, 4);
+
+            List<String> ipv6 =
+                    hostAddresses(c, name, 6);
+
+            return new Host(
+                    name,
+                    sponsor,
+                    ipv4,
+                    ipv6
+            );
+        });
+    }
+
+    /**
+     * RFC 5732 host:update.
+     *
+     * The complete address set is supplied after applying
+     * the requested add/remove operations.
+     */
+    public void updateHost(
+            String registrar,
+            String rawName,
+            List<String> addIpv4,
+            List<String> removeIpv4,
+            List<String> addIpv6,
+            List<String> removeIpv6) {
+
+        tx(c -> {
+
+            requireActive(c, registrar);
+
+            String name = Names.host(rawName);
+
+            List<Object[]> hostRows = rows(
+                    c,
+                    """
+                    SELECT registrar_id
+                    FROM hosts
+                    WHERE name=?
+                    """,
+                    name
+            );
+
+            if (hostRows.isEmpty()) {
+                throw new RegistryException(
+                        2303,
+                        "Host object does not exist"
+                );
+            }
+
+            if (!registrar.equals(hostRows.get(0)[0])) {
+                throw new RegistryException(
+                        2201,
+                        "Authorization error: not the sponsoring registrar"
+                );
+            }
+
+            validateHostAddresses(addIpv4, addIpv6);
+            validateHostAddresses(removeIpv4, removeIpv6);
+
+            Set<String> ipv4 =
+                    new TreeSet<>(hostAddresses(c, name, 4));
+
+            Set<String> ipv6 =
+                    new TreeSet<>(hostAddresses(c, name, 6));
+
+            if (addIpv4 != null) {
+                ipv4.addAll(addIpv4);
+            }
+
+            if (removeIpv4 != null) {
+                ipv4.removeAll(removeIpv4);
+            }
+
+            if (addIpv6 != null) {
+                ipv6.addAll(addIpv6);
+            }
+
+            if (removeIpv6 != null) {
+                ipv6.removeAll(removeIpv6);
+            }
+
+            boolean inZone =
+                    name.equals(cfg.zone())
+                    || name.endsWith("." + cfg.zone());
+
+            if (inZone && ipv4.isEmpty() && ipv6.isEmpty()) {
+                throw new RegistryException(
+                        2306,
+                        "In-bailiwick host requires at least one address"
+                );
+            }
+
+            update(
+                    c,
+                    """
+                    DELETE FROM host_addresses
+                    WHERE host_name=?
+                    """,
+                    name
+            );
+
+            insertHostAddresses(
+                    c,
+                    name,
+                    new ArrayList<>(ipv4),
+                    4
+            );
+
+            insertHostAddresses(
+                    c,
+                    name,
+                    new ArrayList<>(ipv6),
+                    6
+            );
+
+            update(
+                    c,
+                    """
+                    UPDATE hosts
+                    SET updated=?
+                    WHERE name=?
+                    """,
+                    now(),
+                    name
+            );
+
+            audit(
+                    c,
+                    registrar,
+                    "HOST_UPDATE",
+                    name,
+                    "addresses updated"
+            );
+
+            return null;
+        });
+    }
+
+    /**
+     * RFC 5732 host:delete.
+     *
+     * A host referenced by a domain delegation cannot be deleted.
+     */
+    public void deleteHost(
+            String registrar,
+            String rawName) {
+
+        tx(c -> {
+
+            requireActive(c, registrar);
+
+            String name = Names.host(rawName);
+
+            List<Object[]> hostRows = rows(
+                    c,
+                    """
+                    SELECT registrar_id
+                    FROM hosts
+                    WHERE name=?
+                    """,
+                    name
+            );
+
+            if (hostRows.isEmpty()) {
+                throw new RegistryException(
+                        2303,
+                        "Host object does not exist"
+                );
+            }
+
+            if (!registrar.equals(hostRows.get(0)[0])) {
+                throw new RegistryException(
+                        2201,
+                        "Authorization error: not the sponsoring registrar"
+                );
+            }
+
+            List<Object[]> references = rows(
+                    c,
+                    """
+                    SELECT domain_name
+                    FROM domain_ns
+                    WHERE ns=?
+                    LIMIT 1
+                    """,
+                    name
+            );
+
+            if (!references.isEmpty()) {
+                throw new RegistryException(
+                        2304,
+                        "Host object is still referenced by a domain"
+                );
+            }
+
+            update(
+                    c,
+                    "DELETE FROM hosts WHERE name=?",
+                    name
+            );
+
+            audit(
+                    c,
+                    registrar,
+                    "HOST_DELETE",
+                    name,
+                    ""
+            );
+
+            return null;
+        });
+    }
+
+    /**
+     * Checks that all supplied addresses are valid IPv4/IPv6
+     * literals and that the lists don't contain duplicates.
+     */
+    private static void validateHostAddresses(
+            List<String> ipv4,
+            List<String> ipv6) {
+
+        if (ipv4 != null) {
+            Set<String> unique = new HashSet<>();
+
+            for (String address : ipv4) {
+
+                if (address == null ||
+                        !isIpv4(address) ||
+                        !unique.add(address)) {
+
+                    throw new RegistryException(
+                            2005,
+                            "Invalid IPv4 address: "
+                                    + address
+                    );
+                }
+            }
+        }
+
+        if (ipv6 != null) {
+            Set<String> unique = new HashSet<>();
+
+            for (String address : ipv6) {
+
+                if (address == null ||
+                        !isIpv6(address) ||
+                        !unique.add(address)) {
+
+                    throw new RegistryException(
+                            2005,
+                            "Invalid IPv6 address: "
+                                    + address
+                    );
+                }
+            }
+        }
+    }
+
+    private static boolean isIpv4(String address) {
+
+        if (!IPV4.matcher(address).matches()) {
+            return false;
+        }
+
+        String[] parts = address.split("\\.");
+
+        for (String part : parts) {
+            try {
+                int n = Integer.parseInt(part);
+
+                if (n < 0 || n > 255) {
+                    return false;
+                }
+
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static boolean isIpv6(String address) {
+
+        try {
+            java.net.InetAddress parsed =
+                    java.net.InetAddress.getByName(address);
+
+            return parsed instanceof java.net.Inet6Address;
+
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void insertHostAddresses(
+            Connection c,
+            String hostName,
+            List<String> addresses,
+            int version)
+            throws SQLException {
+
+        if (addresses == null) {
+            return;
+        }
+
+        for (String address : addresses) {
+
+            update(
+                    c,
+                    """
+                    INSERT INTO host_addresses(
+                        host_name,
+                        address,
+                        ip_version
+                    )
+                    VALUES(?,?,?)
+                    """,
+                    hostName,
+                    address,
+                    version
+            );
+        }
+    }
+
+    private static List<String> hostAddresses(
+            Connection c,
+            String hostName,
+            int version)
+            throws SQLException {
+
+        List<String> result = new ArrayList<>();
+
+        for (Object[] row : rows(
+                c,
+                """
+                SELECT address
+                FROM host_addresses
+                WHERE host_name=?
+                  AND ip_version=?
+                ORDER BY address
+                """,
+                hostName,
+                version)) {
+
+            result.add((String) row[0]);
+        }
+
+        return result;
+    }
+
+    private void requireRegistrarActive(
+            String registrar) {
+
+        read(c -> {
+            requireActive(c, registrar);
+            return null;
+        });
+    }
+
+    // ---------------------------------------------------------------- RFC 5733 contact commands
+
+    public record ContactView(
+            String id,
+            String sponsor,
+            String name,
+            String org,
+            String email,
+            String phone,
+            String country,
+            long created
+    ) {}
+
+    public record ContactAvailability(String id, boolean available, String reason) {}
+
+    public List<ContactAvailability> checkContacts(String registrar, List<String> ids) {
+        return read(c -> {
+            requireActive(c, registrar);
+            List<ContactAvailability> out = new ArrayList<>();
+
+            for (String id : ids) {
+                if (!ID.matcher(String.valueOf(id)).matches()) {
+                    out.add(new ContactAvailability(String.valueOf(id), false, "Invalid contact id"));
+                    continue;
+                }
+
+                boolean exists = !rows(c,
+                        "SELECT 1 FROM contact WHERE id=?",
+                        id).isEmpty();
+
+                out.add(new ContactAvailability(
+                        id,
+                        !exists,
+                        exists ? "Contact exists" : null
+                ));
+            }
+
+            return out;
+        });
+    }
+
+    public ContactView contactInfo(String registrar, String id) {
+        if (!ID.matcher(String.valueOf(id)).matches())
+            throw new RegistryException(2005, "Invalid contact id");
+
+        return read(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> r = rows(c,
+                    "SELECT id,sponsor,name,org,email,phone,country,created " +
+                    "FROM contact WHERE id=?",
+                    id);
+
+            if (r.isEmpty())
+                throw new RegistryException(2303, "Contact does not exist");
+
+            Object[] x = r.get(0);
+
+            if (!registrar.equals(x[1]))
+                throw new RegistryException(2201,
+                        "Authorization error: not the sponsoring registrar");
+
+            return new ContactView(
+                    (String) x[0],
+                    (String) x[1],
+                    (String) x[2],
+                    (String) x[3],
+                    (String) x[4],
+                    (String) x[5],
+                    (String) x[6],
+                    num(x[7])
+            );
+        });
+    }
+
+    public ContactView updateContact(
+            String registrar,
+            String id,
+            String name,
+            String org,
+            String email,
+            String phone,
+            String country
+    ) {
+        if (!ID.matcher(String.valueOf(id)).matches())
+            throw new RegistryException(2005, "Invalid contact id");
+
+        if (name != null && name.isBlank())
+            throw new RegistryException(2003, "Contact name cannot be empty");
+
+        if (email != null && !EMAIL.matcher(email).matches())
+            throw new RegistryException(2005, "Invalid email");
+
+        if (country != null && !country.matches("[A-Z]{2}"))
+            throw new RegistryException(2005, "Invalid country code");
+
+        return tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> r = rows(c,
+                    "SELECT id,sponsor,name,org,email,phone,country,created " +
+                    "FROM contact WHERE id=?",
+                    id);
+
+            if (r.isEmpty())
+                throw new RegistryException(2303, "Contact does not exist");
+
+            Object[] old = r.get(0);
+
+            if (!registrar.equals(old[1]))
+                throw new RegistryException(2201,
+                        "Authorization error: not the sponsoring registrar");
+
+            String nName = name != null ? name : (String) old[2];
+            String nOrg = org != null ? org : (String) old[3];
+            String nEmail = email != null ? email : (String) old[4];
+            String nPhone = phone != null ? phone : (String) old[5];
+            String nCountry = country != null ? country : (String) old[6];
+
+            update(c,
+                    "UPDATE contact SET name=?,org=?,email=?,phone=?,country=? WHERE id=?",
+                    nName, nOrg, nEmail, nPhone, nCountry, id);
+
+            audit(c, registrar, "CONTACT_UPDATE", id,
+                    "contact data updated");
+
+            return new ContactView(
+                    id,
+                    registrar,
+                    nName,
+                    nOrg,
+                    nEmail,
+                    nPhone,
+                    nCountry,
+                    num(old[7])
+            );
+        });
+    }
+
+    public void deleteContact(String registrar, String id) {
+        if (!ID.matcher(String.valueOf(id)).matches())
+            throw new RegistryException(2005, "Invalid contact id");
+
+        tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> r = rows(c,
+                    "SELECT sponsor FROM contact WHERE id=?",
+                    id);
+
+            if (r.isEmpty())
+                throw new RegistryException(2303, "Contact does not exist");
+
+            if (!registrar.equals(r.get(0)[0]))
+                throw new RegistryException(2201,
+                        "Authorization error: not the sponsoring registrar");
+
+            boolean used = !rows(c,
+                    "SELECT 1 FROM domains WHERE registrant=?",
+                    id).isEmpty();
+
+            if (used)
+                throw new RegistryException(2306,
+                        "Contact is referenced by a domain");
+
+            update(c,
+                    "DELETE FROM contact WHERE id=?",
+                    id);
+
+            audit(c, registrar, "CONTACT_DELETE", id, "");
+
+            return null;
+        });
+    }
+
     // ---------------------------------------------------------------- domain commands
 
     public Availability check(String raw) {
@@ -292,8 +1026,30 @@ public final class Registry {
             for (String h : rawNs) ns.add(Names.host(h));
             if (ns.size() < 2 || ns.size() > 13) throw new RegistryException(2004, "2 to 13 distinct name servers required");
             for (String h : ns) {
-                if (h.endsWith("." + cfg.zone()) || h.equals(cfg.zone()))
-                    throw new RegistryException(2306, "In-bailiwick name servers need host objects (not in this prototype)");
+
+                boolean inBailiwick =
+                        h.equals(cfg.zone())
+                        || h.endsWith("." + cfg.zone());
+
+                if (inBailiwick) {
+
+                    /*
+                     * RFC 5732:
+                     * An in-bailiwick nameserver must have a
+                     * corresponding host object.
+                     */
+                    if (rows(
+                            c,
+                            "SELECT 1 FROM hosts WHERE name=?",
+                            h
+                    ).isEmpty()) {
+
+                        throw new RegistryException(
+                                2306,
+                                "In-bailiwick name server requires a host object"
+                        );
+                    }
+                }
             }
             if (!rows(c, "SELECT 1 FROM domains WHERE name=?", name).isEmpty()) throw new RegistryException(2302, "Object exists");
             List<Object[]> ct = rows(c, "SELECT sponsor FROM contact WHERE id=?", registrant);
@@ -351,6 +1107,196 @@ public final class Registry {
             audit(c, registrar, "DOMAIN_DELETE", name, "-> REDEMPTION");
             outbox(c, "ZONE_CHANGE", name);
             return DeleteOutcome.REDEMPTION;
+        });
+    }
+
+
+    /**
+     * RFC 5731 domain:update.
+     *
+     * Supports:
+     * - adding/removing name servers
+     * - changing registrant
+     *
+     * Status add/removal is deliberately handled separately because
+     * registry server statuses are not stored in the current schema.
+     */
+    public DomainView updateDomain(
+            String registrar,
+            String rawName,
+            String newRegistrant,
+            List<String> addNs,
+            List<String> removeNs
+    ) {
+        return tx(c -> {
+            requireActive(c, registrar);
+
+            String name = Names.parse(rawName, cfg);
+            Row r = owned(c, registrar, name);
+
+            if (!r.state().equals("ACTIVE") &&
+                !r.state().equals("AUTORENEW_GRACE")) {
+                throw new RegistryException(
+                        2304,
+                        "Object status prohibits operation"
+                );
+            }
+
+            // Load current name servers directly from domain_ns.
+            // Row does not contain an ns() field.
+            Set<String> current = new TreeSet<>();
+
+            for (Object[] x : rows(
+                    c,
+                    "SELECT ns FROM domain_ns WHERE domain_name=?",
+                    name
+            )) {
+                current.add((String) x[0]);
+            }
+
+            Set<String> add = new TreeSet<>();
+
+            if (addNs != null) {
+                for (String h : addNs) {
+                    if (h == null || h.isBlank()) {
+                        throw new RegistryException(
+                                2003,
+                                "Invalid host name"
+                        );
+                    }
+
+                    add.add(Names.host(h));
+                }
+            }
+
+            Set<String> remove = new TreeSet<>();
+
+            if (removeNs != null) {
+                for (String h : removeNs) {
+                    if (h == null || h.isBlank()) {
+                        throw new RegistryException(
+                                2003,
+                                "Invalid host name"
+                        );
+                    }
+
+                    remove.add(Names.host(h));
+                }
+            }
+
+            // The same nameserver cannot appear in both add and remove.
+            Set<String> overlap = new TreeSet<>(add);
+            overlap.retainAll(remove);
+
+            if (!overlap.isEmpty()) {
+                throw new RegistryException(
+                        2004,
+                        "The same name server cannot be added and removed"
+                );
+            }
+
+            // In-bailiwick nameservers must have host objects.
+            for (String h : add) {
+                if (h.endsWith("." + cfg.zone()) ||
+                    h.equals(cfg.zone())) {
+
+                    if (rows(
+                            c,
+                            "SELECT 1 FROM hosts WHERE name=?",
+                            h
+                    ).isEmpty()) {
+                        throw new RegistryException(
+                                2306,
+                                "In-bailiwick host object does not exist: " + h
+                        );
+                    }
+                }
+            }
+
+            Set<String> resulting = new TreeSet<>(current);
+            resulting.removeAll(remove);
+            resulting.addAll(add);
+
+            // Registry policy: maintain 2-13 nameservers.
+            if (resulting.size() < 2 || resulting.size() > 13) {
+                throw new RegistryException(
+                        2306,
+                        "Domain must have 2 to 13 name servers"
+                );
+            }
+
+            // Remove nameservers.
+            for (String h : remove) {
+                update(
+                        c,
+                        "DELETE FROM domain_ns WHERE domain_name=? AND ns=?",
+                        name,
+                        h
+                );
+            }
+
+            // Add nameservers.
+            for (String h : add) {
+                if (!current.contains(h)) {
+                    update(
+                            c,
+                            "INSERT INTO domain_ns(domain_name,ns) VALUES(?,?)",
+                            name,
+                            h
+                    );
+                }
+            }
+
+            String registrant = r.registrant();
+
+            // Change registrant.
+            if (newRegistrant != null) {
+
+                List<Object[]> contact = rows(
+                        c,
+                        "SELECT sponsor FROM contact WHERE id=?",
+                        newRegistrant
+                );
+
+                if (contact.isEmpty()) {
+                    throw new RegistryException(
+                            2303,
+                            "Registrant contact does not exist"
+                    );
+                }
+
+                if (!registrar.equals(contact.get(0)[0])) {
+                    throw new RegistryException(
+                            2201,
+                            "Registrant belongs to another registrar"
+                    );
+                }
+
+                registrant = newRegistrant;
+
+                update(
+                        c,
+                        "UPDATE domains SET registrant=? WHERE name=?",
+                        registrant,
+                        name
+                );
+            }
+
+            audit(
+                    c,
+                    registrar,
+                    "DOMAIN_UPDATE",
+                    name,
+                    "registrant=" + registrant +
+                    ";addNS=" + add +
+                    ";removeNS=" + remove
+            );
+
+            if (!add.isEmpty() || !remove.isEmpty()) {
+                outbox(c, "ZONE_CHANGE", name);
+            }
+
+            return view(c, fetch(c, name));
         });
     }
 
