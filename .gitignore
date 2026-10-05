@@ -1,0 +1,11 @@
+﻿# IntelliJ
+.idea/
+
+# Maven build
+target/
+
+# Certificates / private keys
+certs/
+
+# Local data
+data/

@@ -1,0 +1,37 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: cctld-registry
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+registry:
+  zone: xx
+  db: ./data/registry
+  epp:
+    port: 7700
+  rdap:
+    bind: 127.0.0.1
+    port: 8080
+    rate-limit-burst: 20
+    rate-limit-per-second: 10
+  zone-file: ./data/zone.txt
+  tls:
+    keystore: certs/server.p12
+    keystore-password: changeit
+    truststore: certs/server-trust.p12
+    truststore-password: changeit
+  fees:
+    create-per-year: 1000
+    renew-per-year: 1000
+    restore: 4000
+  max-years: 10
+  max-sessions-per-registrar: 10
+  idle-seconds: 300
+  pbkdf2-iterations: 60000
