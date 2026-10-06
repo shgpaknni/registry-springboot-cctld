@@ -82,6 +82,29 @@ class EppTest {
             return cmd("<login><clID>" + id + "</clID><pw>" + pw + "</pw><options><version>1.0</version><lang>en</lang></options><svcs><objURI>urn:ietf:params:xml:ns:domain-1.0</objURI><objURI>urn:ietf:params:xml:ns:host-1.0</objURI><objURI>urn:ietf:params:xml:ns:contact-1.0</objURI><svcExtension><extURI>urn:ietf:params:xml:ns:rgp-1.0</extURI></svcExtension></svcs></login>");
         }
 
+        String loginWithSecDns(String id, String pw) throws IOException {
+            return cmd(
+                    "<login>" +
+                    "<clID>" + id + "</clID>" +
+                    "<pw>" + pw + "</pw>" +
+                    "<options>" +
+                    "<version>1.0</version>" +
+                    "<lang>en</lang>" +
+                    "</options>" +
+                    "<svcs>" +
+                    "<objURI>urn:ietf:params:xml:ns:domain-1.0</objURI>" +
+                    "<objURI>urn:ietf:params:xml:ns:host-1.0</objURI>" +
+                    "<objURI>urn:ietf:params:xml:ns:contact-1.0</objURI>" +
+                    "<svcExtension>" +
+                    "<extURI>urn:ietf:params:xml:ns:rgp-1.0</extURI>" +
+                    "<extURI>urn:ietf:params:xml:ns:secDNS-1.1</extURI>" +
+                    "</svcExtension>" +
+                    "</svcs>" +
+                    "</login>"
+            );
+        }
+
+
         @Override public void close() throws IOException { s.close(); }
     }
 
@@ -219,6 +242,229 @@ class EppTest {
 
 
     @Test
+    void rfc5910SecDnsCreateAndInfo() throws Exception {
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+
+            assertEquals(1000, code(c.loginWithSecDns("reg1", PASS1)));
+
+            assertEquals(1000, code(c.cmd(CONTACT)));
+
+            String create =
+                    "<create>" +
+                    "<domain:create xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>dnssec.xx</domain:name>" +
+                    "<domain:period unit=\"y\">1</domain:period>" +
+                    "<domain:ns>" +
+                    "<domain:hostName>ns1.example.net</domain:hostName>" +
+                    "<domain:hostName>ns2.example.net</domain:hostName>" +
+                    "</domain:ns>" +
+                    "<domain:registrant>con1</domain:registrant>" +
+                    "<domain:authInfo><domain:pw>dnssec-secret</domain:pw></domain:authInfo>" +
+                    "</domain:create>" +
+                    "<extension>" +
+                    "<secDNS:create xmlns:secDNS=\"urn:ietf:params:xml:ns:secDNS-1.1\">" +
+                    "<secDNS:dsData>" +
+                    "<secDNS:keyTag>12345</secDNS:keyTag>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:digestType>2</secDNS:digestType>" +
+                    "<secDNS:digest>AABBCCDDEEFF00112233445566778899</secDNS:digest>" +
+                    "</secDNS:dsData>" +
+                    "<secDNS:keyData>" +
+                    "<secDNS:flags>257</secDNS:flags>" +
+                    "<secDNS:protocol>3</secDNS:protocol>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:pubKey>AwEAAaExamplePublicKey</secDNS:pubKey>" +
+                    "</secDNS:keyData>" +
+                    "</secDNS:create>" +
+                    "</extension>" +
+                    "</create>";
+
+            String cr = c.cmd(create);
+
+            assertEquals(1000, code(cr), cr);
+
+            String info = c.cmd(dom("info", "dnssec.xx"));
+
+            assertEquals(1000, code(info), info);
+            assertTrue(info.contains("<secDNS:infData"), info);
+            assertTrue(info.contains("<secDNS:keyTag>12345</secDNS:keyTag>"), info);
+            assertTrue(info.contains("<secDNS:alg>13</secDNS:alg>"), info);
+            assertTrue(info.contains("<secDNS:digestType>2</secDNS:digestType>"), info);
+            assertTrue(info.contains("AABBCCDDEEFF00112233445566778899"), info);
+            assertTrue(info.contains("<secDNS:flags>257</secDNS:flags>"), info);
+            assertTrue(info.contains("<secDNS:protocol>3</secDNS:protocol>"), info);
+            assertTrue(info.contains("AwEAAaExamplePublicKey"), info);
+        }
+    }
+
+    @Test
+    void rfc5910SecDnsUpdateAddAndRemove() throws Exception {
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+
+            assertEquals(1000, code(c.loginWithSecDns("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+
+            String create =
+                    "<create>" +
+                    "<domain:create xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>dnsupdate.xx</domain:name>" +
+                    "<domain:period unit=\"y\">1</domain:period>" +
+                    "<domain:ns><domain:hostName>ns1.example.net</domain:hostName><domain:hostName>ns2.example.net</domain:hostName></domain:ns>" +
+                    "<domain:registrant>con1</domain:registrant>" +
+                    "<domain:authInfo><domain:pw>dnsupdate-secret</domain:pw></domain:authInfo>" +
+                    "</domain:create>" +
+                    "<extension>" +
+                    "<secDNS:create xmlns:secDNS=\"urn:ietf:params:xml:ns:secDNS-1.1\">" +
+                    "<secDNS:dsData>" +
+                    "<secDNS:keyTag>11111</secDNS:keyTag>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:digestType>2</secDNS:digestType>" +
+                    "<secDNS:digest>11112222333344445555666677778888</secDNS:digest>" +
+                    "</secDNS:dsData>" +
+                    "</secDNS:create>" +
+                    "</extension>" +
+                    "</create>";
+
+            assertEquals(1000, code(c.cmd(create)));
+
+            String add =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>dnsupdate.xx</domain:name>" +
+                    "</domain:update>" +
+                    "<extension>" +
+                    "<secDNS:update xmlns:secDNS=\"urn:ietf:params:xml:ns:secDNS-1.1\">" +
+                    "<secDNS:add>" +
+                    "<secDNS:dsData>" +
+                    "<secDNS:keyTag>22222</secDNS:keyTag>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:digestType>2</secDNS:digestType>" +
+                    "<secDNS:digest>99990000AAAABBBBCCCCDDDDEEEEFFFF</secDNS:digest>" +
+                    "</secDNS:dsData>" +
+                    "</secDNS:add>" +
+                    "</secDNS:update>" +
+                    "</extension>" +
+                    "</update>";
+
+            assertEquals(1000, code(c.cmd(add)));
+
+            String info = c.cmd(dom("info", "dnsupdate.xx"));
+
+            assertTrue(info.contains("11112222333344445555666677778888"), info);
+            assertTrue(info.contains("99990000AAAABBBBCCCCDDDDEEEEFFFF"), info);
+
+            String remove =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>dnsupdate.xx</domain:name>" +
+                    "</domain:update>" +
+                    "<extension>" +
+                    "<secDNS:update xmlns:secDNS=\"urn:ietf:params:xml:ns:secDNS-1.1\">" +
+                    "<secDNS:rem>" +
+                    "<secDNS:dsData>" +
+                    "<secDNS:keyTag>11111</secDNS:keyTag>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:digestType>2</secDNS:digestType>" +
+                    "<secDNS:digest>11112222333344445555666677778888</secDNS:digest>" +
+                    "</secDNS:dsData>" +
+                    "</secDNS:rem>" +
+                    "</secDNS:update>" +
+                    "</extension>" +
+                    "</update>";
+
+            assertEquals(1000, code(c.cmd(remove)));
+
+            info = c.cmd(dom("info", "dnsupdate.xx"));
+
+            assertFalse(info.contains("11112222333344445555666677778888"), info);
+            assertTrue(info.contains("99990000AAAABBBBCCCCDDDDEEEEFFFF"), info);
+        }
+    }
+
+    @Test
+    void rfc5910SecDnsAllDataRemoval() throws Exception {
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+
+            assertEquals(1000, code(c.loginWithSecDns("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+
+            String create =
+                    "<create>" +
+                    "<domain:create xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>dnsall.xx</domain:name>" +
+                    "<domain:period unit=\"y\">1</domain:period>" +
+                    "<domain:ns><domain:hostName>ns1.example.net</domain:hostName><domain:hostName>ns2.example.net</domain:hostName></domain:ns>" +
+                    "<domain:registrant>con1</domain:registrant>" +
+                    "<domain:authInfo><domain:pw>dnsall-secret</domain:pw></domain:authInfo>" +
+                    "</domain:create>" +
+                    "<extension>" +
+                    "<secDNS:create xmlns:secDNS=\"urn:ietf:params:xml:ns:secDNS-1.1\">" +
+                    "<secDNS:dsData>" +
+                    "<secDNS:keyTag>33333</secDNS:keyTag>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:digestType>2</secDNS:digestType>" +
+                    "<secDNS:digest>ABCDEF0123456789</secDNS:digest>" +
+                    "</secDNS:dsData>" +
+                    "<secDNS:keyData>" +
+                    "<secDNS:flags>257</secDNS:flags>" +
+                    "<secDNS:protocol>3</secDNS:protocol>" +
+                    "<secDNS:alg>13</secDNS:alg>" +
+                    "<secDNS:pubKey>ExampleKeyForAllData</secDNS:pubKey>" +
+                    "</secDNS:keyData>" +
+                    "</secDNS:create>" +
+                    "</extension>" +
+                    "</create>";
+
+            assertEquals(1000, code(c.cmd(create)));
+
+            String info = c.cmd(dom("info", "dnsall.xx"));
+            assertTrue(info.contains("<secDNS:infData"), info);
+            assertTrue(info.contains("ABCDEF0123456789"), info);
+            assertTrue(info.contains("ExampleKeyForAllData"), info);
+
+            String removeAll =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>dnsall.xx</domain:name>" +
+                    "</domain:update>" +
+                    "<extension>" +
+                    "<secDNS:update xmlns:secDNS=\"urn:ietf:params:xml:ns:secDNS-1.1\">" +
+                    "<secDNS:rem>" +
+                    "<secDNS:allData/>" +
+                    "</secDNS:rem>" +
+                    "</secDNS:update>" +
+                    "</extension>" +
+                    "</update>";
+
+            assertEquals(1000, code(c.cmd(removeAll)));
+
+            info = c.cmd(dom("info", "dnsall.xx"));
+
+            assertFalse(info.contains("<secDNS:infData"), info);
+        }
+    }
+
+    @Test
+    void rfc5910LoginAdvertisesSecDnsExtension() throws Exception {
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            String greeting = c.read();
+
+            assertTrue(
+                    greeting.contains("urn:ietf:params:xml:ns:secDNS-1.1"),
+                    greeting
+            );
+
+            String login = c.loginWithSecDns("reg1", PASS1);
+
+            assertEquals(1000, code(login), login);
+        }
+    }
+
+
+    @Test
     void sessionLimitIsEnforced() throws Exception {
         server.close();
         startWith(Config.defaults("xx").withPbkdf2Iterations(1000).withMaxSessions(1));
@@ -351,3 +597,11 @@ class EppTest {
     }
 
 }
+
+
+
+
+
+
+
+
