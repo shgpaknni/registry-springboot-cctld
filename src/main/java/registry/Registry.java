@@ -223,7 +223,13 @@ public final class Registry {
             return null;
         });
     }
-
+    public String registrarStatus(String id) {
+        return read(c -> {
+            List<Object[]> r = rows(c, "SELECT status FROM registrar WHERE id=?", id);
+            if (r.isEmpty()) return null;
+            return (String) r.get(0)[0];
+        });
+    }
     public void setRegistrarStatus(String id, String status) {
         if (!Set.of("ACTIVE", "SUSPENDED", "TERMINATED").contains(status)) throw new RegistryException(2005, "Bad status");
         tx(c -> {
@@ -1112,6 +1118,305 @@ public final class Registry {
         });
     }
 
+
+
+    // ================================================================
+    // RFC 5731 DOMAIN TRANSFER
+    // ================================================================
+
+    public record TransferView(
+            String name,
+            String status,
+            String requester,
+            String sponsor,
+            long requested,
+            long expires
+    ) {}
+
+    private static final long TRANSFER_PERIOD_SECONDS = 5L * 24L * 60L * 60L;
+
+    /**
+     * RFC 5731 transfer command.
+     *
+     * query    - either sponsor or requester may inspect a pending transfer
+     * request   - a non-sponsoring registrar requests transfer using AuthInfo
+     * cancel    - requesting registrar cancels its request
+     * approve   - sponsoring registrar approves the request
+     * reject   - sponsoring registrar rejects the request
+     */
+    public TransferView transferDomain(
+            String registrar,
+            String rawName,
+            String op,
+            String authInfo
+    ) {
+        return tx(c -> {
+            requireActive(c, registrar);
+
+            String name = Names.parse(rawName, cfg);
+            Row domain = fetch(c, name);
+
+            if (domain == null)
+                throw new RegistryException(2303, "Object does not exist");
+
+            List<Object[]> pending = rows(
+                    c,
+                    "SELECT requester,current_sponsor,requested,expires " +
+                    "FROM domain_transfer WHERE domain_name=?",
+                    name
+            );
+
+            long now = now();
+
+            // Expired pending transfer requests are discarded.
+            if (!pending.isEmpty() && num(pending.get(0)[3]) <= now) {
+                update(c,
+                        "DELETE FROM domain_transfer WHERE domain_name=?",
+                        name);
+                pending = List.of();
+            }
+
+            switch (op) {
+                case "request" -> {
+                    if (registrar.equals(domain.sponsor()))
+                        throw new RegistryException(
+                                2306,
+                                "Sponsoring registrar cannot request transfer"
+                        );
+
+                    if (!pending.isEmpty())
+                        throw new RegistryException(
+                                2306,
+                                "Transfer already pending"
+                        );
+
+                    if (authInfo == null || authInfo.isBlank())
+                        throw new RegistryException(
+                                2003,
+                                "Transfer AuthInfo is required"
+                        );
+
+                    List<Object[]> hash = rows(
+                            c,
+                            "SELECT authinfo_hash FROM domains WHERE name=?",
+                            name
+                    );
+
+                    if (hash.isEmpty() ||
+                        !Pw.verify(authInfo, (String) hash.get(0)[0])) {
+                        throw new RegistryException(
+                                2200,
+                                "Authorization error"
+                        );
+                    }
+
+                    if (!domain.state().equals("ACTIVE") &&
+                        !domain.state().equals("AUTORENEW_GRACE")) {
+                        throw new RegistryException(
+                                2304,
+                                "Object status prohibits transfer"
+                        );
+                    }
+
+                    long expires = now + TRANSFER_PERIOD_SECONDS;
+
+                    update(
+                            c,
+                            "INSERT INTO domain_transfer(" +
+                            "domain_name,requester,current_sponsor,requested,expires" +
+                            ") VALUES(?,?,?,?,?)",
+                            name,
+                            registrar,
+                            domain.sponsor(),
+                            now,
+                            expires
+                    );
+
+                    audit(
+                            c,
+                            registrar,
+                            "DOMAIN_TRANSFER_REQUEST",
+                            name,
+                            "requester=" + registrar
+                    );
+
+                    return new TransferView(
+                            name,
+                            "pending",
+                            registrar,
+                            domain.sponsor(),
+                            now,
+                            expires
+                    );
+                }
+
+                case "query" -> {
+                    if (pending.isEmpty())
+                        throw new RegistryException(
+                                2303,
+                                "No pending transfer"
+                        );
+
+                    Object[] x = pending.get(0);
+                    String requester = (String) x[0];
+                    String sponsor = (String) x[1];
+
+                    if (!registrar.equals(requester) &&
+                        !registrar.equals(sponsor)) {
+                        throw new RegistryException(
+                                2201,
+                                "Authorization error"
+                        );
+                    }
+
+                    return new TransferView(
+                            name,
+                            "pending",
+                            requester,
+                            sponsor,
+                            num(x[2]),
+                            num(x[3])
+                    );
+                }
+
+                case "cancel" -> {
+                    if (pending.isEmpty())
+                        throw new RegistryException(
+                                2303,
+                                "No pending transfer"
+                        );
+
+                    Object[] x = pending.get(0);
+                    String requester = (String) x[0];
+
+                    if (!registrar.equals(requester))
+                        throw new RegistryException(
+                                2201,
+                                "Only the requesting registrar may cancel"
+                        );
+
+                    update(
+                            c,
+                            "DELETE FROM domain_transfer WHERE domain_name=?",
+                            name
+                    );
+
+                    audit(
+                            c,
+                            registrar,
+                            "DOMAIN_TRANSFER_CANCEL",
+                            name,
+                            ""
+                    );
+
+                    return new TransferView(
+                            name,
+                            "cancelled",
+                            requester,
+                            domain.sponsor(),
+                            num(x[2]),
+                            num(x[3])
+                    );
+                }
+
+                case "approve" -> {
+                    if (pending.isEmpty())
+                        throw new RegistryException(
+                                2303,
+                                "No pending transfer"
+                        );
+
+                    Object[] x = pending.get(0);
+                    String requester = (String) x[0];
+                    String sponsor = (String) x[1];
+
+                    if (!registrar.equals(sponsor))
+                        throw new RegistryException(
+                                2201,
+                                "Only the sponsoring registrar may approve"
+                        );
+
+                    update(
+                            c,
+                            "UPDATE domains SET sponsor=? WHERE name=?",
+                            requester,
+                            name
+                    );
+
+                    update(
+                            c,
+                            "DELETE FROM domain_transfer WHERE domain_name=?",
+                            name
+                    );
+
+                    audit(
+                            c,
+                            registrar,
+                            "DOMAIN_TRANSFER_APPROVE",
+                            name,
+                            sponsor + " -> " + requester
+                    );
+
+                    outbox(c, "ZONE_CHANGE", name);
+
+                    return new TransferView(
+                            name,
+                            "serverApproved",
+                            requester,
+                            requester,
+                            num(x[2]),
+                            num(x[3])
+                    );
+                }
+
+                case "reject" -> {
+                    if (pending.isEmpty())
+                        throw new RegistryException(
+                                2303,
+                                "No pending transfer"
+                        );
+
+                    Object[] x = pending.get(0);
+                    String requester = (String) x[0];
+                    String sponsor = (String) x[1];
+
+                    if (!registrar.equals(sponsor))
+                        throw new RegistryException(
+                                2201,
+                                "Only the sponsoring registrar may reject"
+                        );
+
+                    update(
+                            c,
+                            "DELETE FROM domain_transfer WHERE domain_name=?",
+                            name
+                    );
+
+                    audit(
+                            c,
+                            registrar,
+                            "DOMAIN_TRANSFER_REJECT",
+                            name,
+                            ""
+                    );
+
+                    return new TransferView(
+                            name,
+                            "clientRejected",
+                            requester,
+                            sponsor,
+                            num(x[2]),
+                            num(x[3])
+                    );
+                }
+
+                default -> throw new RegistryException(
+                        2003,
+                        "Invalid transfer operation"
+                );
+            }
+        });
+    }
 
     /**
      * RFC 5731 domain:update.

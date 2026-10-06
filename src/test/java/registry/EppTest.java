@@ -216,6 +216,8 @@ class EppTest {
         }
     }
 
+
+
     @Test
     void sessionLimitIsEnforced() throws Exception {
         server.close();
@@ -227,4 +229,125 @@ class EppTest {
             assertEquals(2500, code(b.login("reg1", PASS1)));
         }
     }
+
+    
+    @Test
+    void domainTransferLifecycle() throws Exception {
+
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+
+            c.read();
+
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+
+            c.cmd(CONTACT);
+
+            String create = c.cmd(createDomain("transfer.xx", 1));
+
+            assertEquals(1000, code(create), create);
+        }
+
+        try (Client c = new Client(clientCtx("reg2"), server.port())) {
+
+            c.read();
+
+            assertEquals(1000, code(c.login("reg2", PASS2)));
+
+            String request =
+                    "<transfer op=\"request\">" +
+                    "<domain:transfer xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>transfer.xx</domain:name>" +
+                    "<domain:authInfo>" +
+                    "<domain:pw>auth-secret-1</domain:pw>" +
+                    "</domain:authInfo>" +
+                    "</domain:transfer>" +
+                    "</transfer>";
+
+            String r = c.cmd(request);
+
+            assertEquals(1000, code(r), r);
+            assertTrue(
+                    r.contains("<domain:trStatus>pending</domain:trStatus>"),
+                    r
+            );
+            assertTrue(
+                    r.contains("<domain:reID>reg2</domain:reID>"),
+                    r
+            );
+            assertTrue(
+                    r.contains("<domain:acID>reg1</domain:acID>"),
+                    r
+            );
+            assertTrue(
+                    r.contains("<domain:reDate>"),
+                    r
+            );
+            assertTrue(
+                    r.contains("<domain:acDate>"),
+                    r
+            );
+
+            String query =
+                    "<transfer op=\"query\">" +
+                    "<domain:transfer xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>transfer.xx</domain:name>" +
+                    "</domain:transfer>" +
+                    "</transfer>";
+
+            r = c.cmd(query);
+
+            assertEquals(1000, code(r), r);
+            assertTrue(
+                    r.contains("<domain:trStatus>pending</domain:trStatus>"),
+                    r
+            );
+        }
+
+        // reg1 is the current sponsor and therefore approves.
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+
+            c.read();
+
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+
+            String approve =
+                    "<transfer op=\"approve\">" +
+                    "<domain:transfer xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>transfer.xx</domain:name>" +
+                    "</domain:transfer>" +
+                    "</transfer>";
+
+            String r = c.cmd(approve);
+
+            assertEquals(1000, code(r), r);
+            assertTrue(
+                    r.contains("<domain:trStatus>serverApproved</domain:trStatus>"),
+                    r
+            );
+        }
+
+        // Verify new sponsor.
+        try (Client c = new Client(clientCtx("reg2"), server.port())) {
+
+            c.read();
+
+            assertEquals(1000, code(c.login("reg2", PASS2)));
+
+            String info =
+                    "<info>" +
+                    "<domain:info xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>transfer.xx</domain:name>" +
+                    "</domain:info>" +
+                    "</info>";
+
+            String r = c.cmd(info);
+
+            assertEquals(1000, code(r), r);
+            assertTrue(
+                    r.contains("<domain:clID>reg2</domain:clID>"),
+                    r
+            );
+        }
+    }
+
 }
