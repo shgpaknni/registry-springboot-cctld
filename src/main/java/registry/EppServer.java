@@ -219,8 +219,11 @@ public final class EppServer implements AutoCloseable {
             st.close = true;
             return response(1500, "Command completed successfully; ending session", null, cl);
         }
-        if (!Set.of("check", "create", "info", "renew", "delete", "update").contains(name))
+        if (!Set.of("check", "create", "info", "renew", "delete", "update", "poll").contains(name))
             throw new RegistryException(2101, "Unimplemented command");
+        if ("poll".equals(name))
+            return poll(st, cmd, cl);
+
         if (st.registrar == null) throw new RegistryException(2002, "Command use error: login required");
         List<Element> k = kids(cmd);
         if (k.isEmpty()) throw new RegistryException(2001, "Command syntax error");
@@ -255,20 +258,206 @@ public final class EppServer implements AutoCloseable {
     }
 
     private String login(Session st, Element cmd, String cl) {
-        String id = text(cmd, "clID"), pw = text(cmd, "pw");
-        if (st.registrar != null) throw new RegistryException(2002, "Command use error: already logged in");
-        if (id == null || pw == null) throw new RegistryException(2001, "Command syntax error");
+
+        String id = text(cmd, "clID");
+        String pw = text(cmd, "pw");
+
+        if (st.registrar != null)
+            throw new RegistryException(
+                    2002,
+                    "Command use error: already logged in"
+            );
+
+        if (id == null || pw == null)
+            throw new RegistryException(
+                    2001,
+                    "Command syntax error"
+            );
+
+        Element options = kid(cmd, "options");
+        Element svcs = kid(cmd, "svcs");
+
+        if (options == null || svcs == null)
+            throw new RegistryException(
+                    2003,
+                    "Required login options/services missing"
+            );
+
+        String version = text(options, "version");
+        String lang = text(options, "lang");
+
+        if (!"1.0".equals(version))
+            throw new RegistryException(
+                    2102,
+                    "Unsupported EPP version"
+            );
+
+        if (lang != null && !"en".equalsIgnoreCase(lang))
+            throw new RegistryException(
+                    2102,
+                    "Unsupported language"
+            );
+
+        boolean supportedService = false;
+
+        for (Element e : kids(svcs)) {
+
+            if (!"objURI".equals(e.getLocalName()))
+                continue;
+
+            String uri = e.getTextContent().trim();
+
+            if (NS_DOMAIN.equals(uri) ||
+                NS_HOST.equals(uri) ||
+                NS_CONTACT.equals(uri)) {
+
+                supportedService = true;
+
+            } else {
+
+                throw new RegistryException(
+                        2102,
+                        "Unsupported service"
+                );
+            }
+        }
+
+        if (!supportedService)
+            throw new RegistryException(
+                    2102,
+                    "No supported EPP service requested"
+            );
+
+        Element svcExtension = kid(svcs, "svcExtension");
+
+        if (svcExtension != null) {
+
+            for (Element e : kids(svcExtension)) {
+
+                if (!"extURI".equals(e.getLocalName()))
+                    continue;
+
+                String uri = e.getTextContent().trim();
+
+                if (!NS_RGP.equals(uri))
+                    throw new RegistryException(
+                            2102,
+                            "Unsupported EPP extension"
+                    );
+            }
+        }
+
         if (!reg.authenticate(id, pw, st.certFp)) {
-            if (++st.failures >= 3) st.close = true;
-            throw new RegistryException(2200, "Authentication error");
+
+            if (++st.failures >= 3)
+                st.close = true;
+
+            throw new RegistryException(
+                    2200,
+                    "Authentication error"
+            );
         }
-        AtomicInteger n = sessions.computeIfAbsent(id, x -> new AtomicInteger());
-        if (n.incrementAndGet() > reg.config().maxSessionsPerRegistrar()) {
+
+        AtomicInteger n =
+                sessions.computeIfAbsent(
+                        id,
+                        x -> new AtomicInteger()
+                );
+
+        if (n.incrementAndGet() >
+                reg.config().maxSessionsPerRegistrar()) {
+
             n.decrementAndGet();
-            throw new RegistryException(2500, "Command failed; server closing connection: session limit reached");
+
+            throw new RegistryException(
+                    2500,
+                    "Command failed; server closing connection: session limit reached"
+            );
         }
+
         st.registrar = id;
-        return response(1000, "Command completed successfully", null, cl);
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
+    }
+
+
+    // ================================================================
+    // RFC 5730 POLL
+    // ================================================================
+
+    private String poll(Session st, Element cmd, String cl) {
+
+        if (st.registrar == null)
+            throw new RegistryException(
+                    2002,
+                    "Command use error: login required"
+            );
+
+        String op = cmd.getAttribute("op");
+
+        if (!"req".equals(op) && !"ack".equals(op))
+            throw new RegistryException(
+                    2003,
+                    "Invalid poll operation"
+            );
+
+        if ("ack".equals(op)) {
+
+            String msgId = cmd.getAttribute("msgID");
+
+            if (msgId == null || msgId.isBlank())
+                throw new RegistryException(
+                        2003,
+                        "Required parameter missing: msgID"
+                );
+
+            long id;
+
+            try {
+                id = Long.parseLong(msgId);
+            } catch (NumberFormatException e) {
+                throw new RegistryException(
+                        2005,
+                        "Invalid msgID"
+                );
+            }
+
+            reg.acknowledgeMessage(st.registrar, id);
+        }
+
+        Optional<Registry.PollMessage> message =
+                reg.pollMessage(st.registrar);
+
+        if (message.isEmpty()) {
+
+            return response(
+                    1300,
+                    "Command completed successfully; no messages",
+                    "<msgQ count=\"0\"/>",
+                    cl
+            );
+        }
+
+        Registry.PollMessage m = message.get();
+
+        String body =
+                "<msgQ count=\"" + m.count() + "\">" +
+                "<msgID>" + m.id() + "</msgID>" +
+                "<qDate>" + date(m.qdate()) + "</qDate>" +
+                "<msg>" + esc(m.message()) + "</msg>" +
+                "</msgQ>";
+
+        return response(
+                1300,
+                "Command completed successfully; message available",
+                body,
+                cl
+        );
     }
 
     private static int period(Element obj) {
