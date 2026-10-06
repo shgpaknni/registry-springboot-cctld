@@ -55,6 +55,34 @@ public final class Db {
             PRIMARY KEY(domain_name, ns)
         );
 
+        /* RFC 5910 - DNSSEC EPP */
+
+        CREATE TABLE domain_ds(
+            domain_name VARCHAR(253) NOT NULL
+                REFERENCES domains(name) ON DELETE CASCADE,
+            key_tag INT NOT NULL,
+            alg INT NOT NULL,
+            digest_type INT NOT NULL,
+            digest VARCHAR(128) NOT NULL,
+            PRIMARY KEY(domain_name, key_tag, alg, digest_type)
+        );
+
+        CREATE INDEX idx_domain_ds_domain
+            ON domain_ds(domain_name);
+
+        CREATE TABLE domain_dnskey(
+            domain_name VARCHAR(253) NOT NULL
+                REFERENCES domains(name) ON DELETE CASCADE,
+            flags INT NOT NULL,
+            protocol INT NOT NULL,
+            alg INT NOT NULL,
+            public_key VARCHAR(2048) NOT NULL,
+            PRIMARY KEY(domain_name, flags, protocol, alg, public_key)
+        );
+
+        CREATE INDEX idx_domain_dnskey_domain
+            ON domain_dnskey(domain_name);
+
         /* RFC 5731 - Domain transfer state */
 
         CREATE TABLE domain_transfer(

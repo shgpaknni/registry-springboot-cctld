@@ -32,6 +32,7 @@ public final class EppServer implements AutoCloseable {
     static final String NS_HOST = "urn:ietf:params:xml:ns:host-1.0";
     static final String NS_CONTACT = "urn:ietf:params:xml:ns:contact-1.0";
     static final String NS_RGP = "urn:ietf:params:xml:ns:rgp-1.0";
+    static final String NS_SECDNS = "urn:ietf:params:xml:ns:secDNS-1.1";
     private static final int MAX_FRAME = 1_048_576;
 
     private final Registry reg;
@@ -176,7 +177,7 @@ public final class EppServer implements AutoCloseable {
                 + "<objURI>" + NS_DOMAIN + "</objURI>"
                 + "<objURI>" + NS_HOST + "</objURI>"
                 + "<objURI>" + NS_CONTACT + "</objURI>"
-                + "<svcExtension><extURI>" + NS_RGP + "</extURI></svcExtension></svcMenu>"
+                + "<svcExtension><extURI>" + NS_RGP + "</extURI><extURI>" + NS_SECDNS + "</extURI></svcExtension></svcMenu>"
                 + "<dcp><access><all/></access><statement><purpose><admin/><prov/></purpose><recipient><ours/><public/></recipient>"
                 + "<retention><stated/></retention></statement></dcp></greeting></epp>";
     }
@@ -204,7 +205,7 @@ public final class EppServer implements AutoCloseable {
         }
         if (cmd == null) return response(2001, "Command syntax error", null, cl);
         try {
-            return execute(st, cmd, kid(top, "extension"), cl);
+            return execute(st, cmd, kid(top, "extension") != null ? kid(top, "extension") : kid(cmd, "extension"), cl);
         } catch (RegistryException e) {
             if (e.code >= 2500) st.close = true;
             return response(e.code, e.getMessage(), null, cl);
@@ -232,7 +233,7 @@ public final class EppServer implements AutoCloseable {
         if (NS_DOMAIN.equals(obj.getNamespaceURI())) {
             switch (name) {
                 case "check": return domainCheck(obj, cl);
-                case "create": return domainCreate(st, obj, cl);
+                case "create": return domainCreate(st, obj, ext, cl);
                 case "info": return domainInfo(st, obj, cl);
                 case "renew": return domainRenew(st, obj, cl);
                 case "delete": return domainDelete(st, obj, cl);
@@ -311,7 +312,8 @@ public final class EppServer implements AutoCloseable {
 
             if (NS_DOMAIN.equals(uri) ||
                 NS_HOST.equals(uri) ||
-                NS_CONTACT.equals(uri)) {
+                NS_CONTACT.equals(uri) ||
+                NS_SECDNS.equals(uri)) {
 
                 supportedService = true;
 
@@ -341,7 +343,8 @@ public final class EppServer implements AutoCloseable {
 
                 String uri = e.getTextContent().trim();
 
-                if (!NS_RGP.equals(uri))
+                if (!NS_RGP.equals(uri) &&
+                    !NS_SECDNS.equals(uri))
                     throw new RegistryException(
                             2102,
                             "Unsupported EPP extension"
@@ -495,7 +498,12 @@ public final class EppServer implements AutoCloseable {
         return response(1000, "Command completed successfully", sb.append("</domain:chkData></resData>").toString(), cl);
     }
 
-    private String domainCreate(Session st, Element obj, String cl) {
+    private String domainCreate(
+            Session st,
+            Element obj,
+            Element ext,
+            String cl
+    ) {
         List<String> ns = new ArrayList<>();
         Element nsEl = kid(obj, "ns");
         if (nsEl != null) {
@@ -506,6 +514,24 @@ public final class EppServer implements AutoCloseable {
         Element ai = kid(obj, "authInfo");
         Registry.DomainView v = reg.createDomain(st.registrar, need(obj, "name"), period(obj), need(obj, "registrant"), ns,
                 ai == null ? null : text(ai, "pw"));
+        if (ext != null) {
+            for (Element e : kids(ext)) {
+
+                if (!NS_SECDNS.equals(e.getNamespaceURI()))
+                    continue;
+
+                if (!"create".equals(e.getLocalName()))
+                    continue;
+
+                reg.secDnsCreate(
+                        st.registrar,
+                        need(obj, "name"),
+                        parseSecDnsDs(e),
+                        parseSecDnsKeys(e)
+                );
+            }
+        }
+
         String body = "<resData><domain:creData xmlns:domain=\"" + NS_DOMAIN + "\"><domain:name>" + esc(v.name()) + "</domain:name>"
                 + "<domain:crDate>" + date(v.created()) + "</domain:crDate><domain:exDate>" + date(v.expires()) + "</domain:exDate></domain:creData></resData>";
         return response(1000, "Command completed successfully", body, cl);
@@ -526,6 +552,66 @@ public final class EppServer implements AutoCloseable {
             default -> null;
         };
         if (rgp != null) sb.append("<extension><rgp:infData xmlns:rgp=\"" + NS_RGP + "\"><rgp:rgpStatus s=\"").append(rgp).append("\"/></rgp:infData></extension>");
+
+        Registry.SecDnsView sec =
+                reg.secDnsInfo(
+                        st.registrar,
+                        need(obj, "name")
+                );
+
+        if (!sec.dsData().isEmpty() || !sec.keyData().isEmpty()) {
+
+            sb.append("<extension><secDNS:infData xmlns:secDNS=\"")
+              .append(NS_SECDNS)
+              .append("\">");
+
+            for (Registry.DsData d : sec.dsData()) {
+
+                sb.append("<secDNS:dsData>")
+                  .append("<secDNS:keyTag>")
+                  .append(d.keyTag())
+                  .append("</secDNS:keyTag>")
+
+                  .append("<secDNS:alg>")
+                  .append(d.alg())
+                  .append("</secDNS:alg>")
+
+                  .append("<secDNS:digestType>")
+                  .append(d.digestType())
+                  .append("</secDNS:digestType>")
+
+                  .append("<secDNS:digest>")
+                  .append(esc(d.digest()))
+                  .append("</secDNS:digest>")
+
+                  .append("</secDNS:dsData>");
+            }
+
+            for (Registry.DnsKeyData k : sec.keyData()) {
+
+                sb.append("<secDNS:keyData>")
+                  .append("<secDNS:flags>")
+                  .append(k.flags())
+                  .append("</secDNS:flags>")
+
+                  .append("<secDNS:protocol>")
+                  .append(k.protocol())
+                  .append("</secDNS:protocol>")
+
+                  .append("<secDNS:alg>")
+                  .append(k.alg())
+                  .append("</secDNS:alg>")
+
+                  .append("<secDNS:pubKey>")
+                  .append(esc(k.publicKey()))
+                  .append("</secDNS:pubKey>")
+
+                  .append("</secDNS:keyData>");
+            }
+
+            sb.append("</secDNS:infData></extension>");
+        }
+
         return response(1000, "Command completed successfully", sb.toString(), cl);
     }
 
@@ -646,18 +732,28 @@ public final class EppServer implements AutoCloseable {
             String cl
     ) {
         /*
-         * RFC 5731 domain:update.
+         * RFC 5731 domain:update plus RFC 5910 secDNS:update.
          *
-         * Supports:
-         *   domain:add/ns
-         *   domain:rem/ns
-         *   domain:chg/registrant
-         *
-         * RGP restore remains handled separately.
+         * IMPORTANT:
+         * RGP and secDNS both use <update>, so namespace MUST be checked.
          */
 
-        Element rgpUpdate =
-                ext == null ? null : kid(ext, "update");
+        Element rgpUpdate = null;
+        Element secDnsUpdate = null;
+
+        if (ext != null) {
+            for (Element e : kids(ext)) {
+                if (!"update".equals(e.getLocalName())) {
+                    continue;
+                }
+
+                if (NS_RGP.equals(e.getNamespaceURI())) {
+                    rgpUpdate = e;
+                } else if (NS_SECDNS.equals(e.getNamespaceURI())) {
+                    secDnsUpdate = e;
+                }
+            }
+        }
 
         Element restore =
                 rgpUpdate == null ? null : kid(rgpUpdate, "restore");
@@ -716,23 +812,51 @@ public final class EppServer implements AutoCloseable {
             registrant = text(chg, "registrant");
         }
 
-        if (addNs.isEmpty() &&
-            removeNs.isEmpty() &&
-            registrant == null) {
+        boolean domainChanged =
+                !addNs.isEmpty() ||
+                !removeNs.isEmpty() ||
+                registrant != null;
 
+        boolean secDnsChanged = secDnsUpdate != null;
+
+        if (!domainChanged && !secDnsChanged) {
             throw new RegistryException(
                     2003,
                     "Domain update contains no changes"
             );
         }
 
-        reg.updateDomain(
-                st.registrar,
-                need(obj, "name"),
-                registrant,
-                addNs,
-                removeNs
-        );
+        if (domainChanged) {
+            reg.updateDomain(
+                    st.registrar,
+                    need(obj, "name"),
+                    registrant,
+                    addNs,
+                    removeNs
+            );
+        }
+
+        if (secDnsChanged) {
+            Element secAdd = kid(secDnsUpdate, "add");
+            Element secRem = kid(secDnsUpdate, "rem");
+
+            boolean removeAll =
+                    secRem != null &&
+                    (
+                        kid(secRem, "allData") != null ||
+                        kid(secRem, "all") != null
+                    );
+
+            reg.secDnsUpdate(
+                    st.registrar,
+                    need(obj, "name"),
+                    parseSecDnsDs(secAdd),
+                    parseSecDnsDs(secRem),
+                    parseSecDnsKeys(secAdd),
+                    parseSecDnsKeys(secRem),
+                    removeAll
+            );
+        }
 
         return response(
                 1000,
@@ -741,6 +865,7 @@ public final class EppServer implements AutoCloseable {
                 cl
         );
     }
+
 
     private String domainRestore(Session st, Element obj, Element ext, String cl) {
         Element upd = ext == null ? null : kid(ext, "update");
@@ -1252,5 +1377,64 @@ public final class EppServer implements AutoCloseable {
         return response(1000, "Command completed successfully", body, cl);
     }
 
+
+    private List<Registry.DsData> parseSecDnsDs(Element parent) {
+        if (parent == null) return List.of();
+
+        List<Registry.DsData> out = new ArrayList<>();
+
+        for (Element e : kids(parent)) {
+            if (!"dsData".equals(e.getLocalName()))
+                continue;
+
+            try {
+                out.add(new Registry.DsData(
+                        Integer.parseInt(need(e, "keyTag")),
+                        Integer.parseInt(need(e, "alg")),
+                        Integer.parseInt(need(e, "digestType")),
+                        need(e, "digest")
+                ));
+            } catch (NumberFormatException ex) {
+                throw new RegistryException(2005, "Invalid secDNS DS numerical field");
+            }
+        }
+
+        return out;
+    }
+
+    private List<Registry.DnsKeyData> parseSecDnsKeys(Element parent) {
+        if (parent == null) return List.of();
+
+        List<Registry.DnsKeyData> out = new ArrayList<>();
+
+        for (Element e : kids(parent)) {
+            if (!"keyData".equals(e.getLocalName()))
+                continue;
+
+            try {
+                out.add(new Registry.DnsKeyData(
+                        Integer.parseInt(need(e, "flags")),
+                        Integer.parseInt(need(e, "protocol")),
+                        Integer.parseInt(need(e, "alg")),
+                        need(e, "pubKey")
+                ));
+            } catch (NumberFormatException ex) {
+                throw new RegistryException(2005, "Invalid secDNS Key numerical field");
+            }
+        }
+
+        return out;
+    }
     private static String date(long epoch) { return Instant.ofEpochSecond(epoch).toString(); }
 }
+
+
+
+
+
+
+
+
+
+
+

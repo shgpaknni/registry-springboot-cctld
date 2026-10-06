@@ -86,10 +86,10 @@ public final class Registry {
                 throw e;
             } catch (Exception e) {
                 c.rollback();
-                throw new RegistryException(2400, "Command failed", e);
+                throw new RegistryException(2400, "Command failed: " + e.getMessage(), e);
             }
         } catch (SQLException e) {
-            throw new RegistryException(2400, "Command failed", e);
+            throw new RegistryException(2400, "Command failed: " + e.getMessage(), e);
         } finally {
             writeLock.unlock();
         }
@@ -105,7 +105,7 @@ public final class Registry {
         } catch (RegistryException e) {
             throw e;
         } catch (Exception e) {
-            throw new RegistryException(2400, "Command failed", e);
+            throw new RegistryException(2400, "Command failed: " + e.getMessage(), e);
         }
     }
 
@@ -1124,6 +1124,25 @@ public final class Registry {
     // RFC 5731 DOMAIN TRANSFER
     // ================================================================
 
+    public record DsData(
+            int keyTag,
+            int alg,
+            int digestType,
+            String digest
+    ) {}
+
+    public record DnsKeyData(
+            int flags,
+            int protocol,
+            int alg,
+            String publicKey
+    ) {}
+
+    public record SecDnsView(
+            List<DsData> dsData,
+            List<DnsKeyData> keyData
+    ) {}
+
     public record TransferView(
             String name,
             String status,
@@ -1857,4 +1876,235 @@ public final class Registry {
             );
         }
     }
+    /* ============================================================
+       RFC 5910 - EPP DNSSEC Mapping
+       ============================================================ */
+
+    public SecDnsView secDnsInfo(String registrar, String name) {
+        return tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> d = rows(c, """
+                    SELECT key_tag, alg, digest_type, digest
+                    FROM domain_ds
+                    WHERE domain_name=?
+                    ORDER BY key_tag, alg, digest_type
+                    """, name);
+
+            List<Object[]> k = rows(c, """
+                    SELECT flags, protocol, alg, public_key
+                    FROM domain_dnskey
+                    WHERE domain_name=?
+                    ORDER BY flags, protocol, alg, public_key
+                    """, name);
+
+            List<DsData> ds = new ArrayList<>();
+            for (Object[] x : d) {
+                ds.add(new DsData(
+                        ((Number)x[0]).intValue(),
+                        ((Number)x[1]).intValue(),
+                        ((Number)x[2]).intValue(),
+                        (String)x[3]
+                ));
+            }
+
+            List<DnsKeyData> keys = new ArrayList<>();
+            for (Object[] x : k) {
+                keys.add(new DnsKeyData(
+                        ((Number)x[0]).intValue(),
+                        ((Number)x[1]).intValue(),
+                        ((Number)x[2]).intValue(),
+                        (String)x[3]
+                ));
+            }
+
+            return new SecDnsView(ds, keys);
+        });
+    }
+
+    public void secDnsCreate(
+            String registrar,
+            String name,
+            List<DsData> ds,
+            List<DnsKeyData> keys) {
+
+        tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> domain =
+                    rows(c, "SELECT sponsor FROM domains WHERE name=?", name);
+
+            if (domain.isEmpty())
+                throw new RegistryException(2303, "Object does not exist");
+
+            if (!registrar.equals(domain.get(0)[0]))
+                throw new RegistryException(2201, "Authorization error");
+
+            validateSecDns(ds, keys);
+
+            update(c, "DELETE FROM domain_ds WHERE domain_name=?", name);
+            update(c, "DELETE FROM domain_dnskey WHERE domain_name=?", name);
+
+            insertSecDns(c, name, ds, keys);
+
+            audit(c, registrar, "SECDNS_CREATE", name,
+                    "ds=" + ds.size() + ",keys=" + keys.size());
+
+            outbox(c, "SECDNS", name);
+
+            return null;
+        });
+    }
+
+    public void secDnsUpdate(
+            String registrar,
+            String name,
+            List<DsData> addDs,
+            List<DsData> remDs,
+            List<DnsKeyData> addKeys,
+            List<DnsKeyData> remKeys,
+            boolean removeAll) {
+
+        tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> domain =
+                    rows(c, "SELECT sponsor FROM domains WHERE name=?", name);
+
+            if (domain.isEmpty())
+                throw new RegistryException(2303, "Object does not exist");
+
+            if (!registrar.equals(domain.get(0)[0]))
+                throw new RegistryException(2201, "Authorization error");
+
+            validateSecDns(addDs, addKeys);
+            validateSecDns(remDs, remKeys);
+
+            if (removeAll) {
+                update(c, "DELETE FROM domain_ds WHERE domain_name=?", name);
+                update(c, "DELETE FROM domain_dnskey WHERE domain_name=?", name);
+            }
+
+            for (DsData x : remDs) {
+                update(c, """
+                        DELETE FROM domain_ds
+                        WHERE domain_name=?
+                          AND key_tag=?
+                          AND alg=?
+                          AND digest_type=?
+                          AND digest=?
+                        """,
+                        name,
+                        x.keyTag(),
+                        x.alg(),
+                        x.digestType(),
+                        x.digest());
+            }
+
+            for (DnsKeyData x : remKeys) {
+                update(c, """
+                        DELETE FROM domain_dnskey
+                        WHERE domain_name=?
+                          AND flags=?
+                          AND protocol=?
+                          AND alg=?
+                          AND public_key=?
+                        """,
+                        name,
+                        x.flags(),
+                        x.protocol(),
+                        x.alg(),
+                        x.publicKey());
+            }
+
+            insertSecDns(c, name, addDs, addKeys);
+
+            audit(c, registrar, "SECDNS_UPDATE", name,
+                    "addDs=" + addDs.size()
+                            + ",remDs=" + remDs.size()
+                            + ",addKeys=" + addKeys.size()
+                            + ",remKeys=" + remKeys.size()
+                            + ",all=" + removeAll);
+
+            outbox(c, "SECDNS", name);
+
+            return null;
+        });
+    }
+
+    private void insertSecDns(
+            Connection c,
+            String name,
+            List<DsData> ds,
+            List<DnsKeyData> keys) throws SQLException {
+
+        for (DsData x : ds) {
+            update(c, """
+                    INSERT INTO domain_ds
+                        (domain_name,key_tag,alg,digest_type,digest)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    name,
+                    x.keyTag(),
+                    x.alg(),
+                    x.digestType(),
+                    x.digest());
+        }
+
+        for (DnsKeyData x : keys) {
+            update(c, """
+                    INSERT INTO domain_dnskey
+                        (domain_name,flags,protocol,alg,public_key)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    name,
+                    x.flags(),
+                    x.protocol(),
+                    x.alg(),
+                    x.publicKey());
+        }
+    }
+
+    private void validateSecDns(
+            List<DsData> ds,
+            List<DnsKeyData> keys) {
+
+        if (ds == null || keys == null)
+            throw new RegistryException(2001, "Missing DNSSEC data");
+
+        for (DsData x : ds) {
+            if (x.keyTag() < 0 || x.keyTag() > 65535)
+                throw new RegistryException(2001, "Invalid DS keyTag");
+
+            if (x.alg() < 0 || x.alg() > 255)
+                throw new RegistryException(2001, "Invalid DS alg");
+
+            if (x.digestType() < 0 || x.digestType() > 255)
+                throw new RegistryException(2001, "Invalid DS digest type");
+
+            if (x.digest() == null || x.digest().isBlank()
+                    || !x.digest().matches("[0-9A-Fa-f]+")) {
+                throw new RegistryException(2001, "Invalid DS digest");
+            }
+        }
+
+        for (DnsKeyData x : keys) {
+            if (x.flags() < 0 || x.flags() > 65535)
+                throw new RegistryException(2001, "Invalid DNSKEY flags");
+
+            if (x.protocol() != 3)
+                throw new RegistryException(2001, "DNSKEY protocol must be 3");
+
+            if (x.alg() < 0 || x.alg() > 255)
+                throw new RegistryException(2001, "Invalid DNSKEY alg");
+
+            if (x.publicKey() == null || x.publicKey().isBlank())
+                throw new RegistryException(2001, "Invalid DNSKEY public key");
+        }
+    }
+
 }
+
+
+
+
