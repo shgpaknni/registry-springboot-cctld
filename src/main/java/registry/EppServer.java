@@ -3,6 +3,7 @@ package registry;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
@@ -219,7 +220,7 @@ public final class EppServer implements AutoCloseable {
             st.close = true;
             return response(1500, "Command completed successfully; ending session", null, cl);
         }
-        if (!Set.of("check", "create", "info", "renew", "delete", "update", "poll").contains(name))
+        if (!Set.of("check", "create", "info", "renew", "delete", "update", "transfer", "poll").contains(name))
             throw new RegistryException(2101, "Unimplemented command");
         if ("poll".equals(name))
             return poll(st, cmd, cl);
@@ -236,6 +237,7 @@ public final class EppServer implements AutoCloseable {
                 case "renew": return domainRenew(st, obj, cl);
                 case "delete": return domainDelete(st, obj, cl);
                 case "update": return domainUpdate(st, obj, ext, cl);
+                case "transfer": return domainTransfer(st, obj, ext, cl);
                 default: break;
             }
         } else if (NS_CONTACT.equals(obj.getNamespaceURI())) {
@@ -547,6 +549,95 @@ public final class EppServer implements AutoCloseable {
                 : response(1001, "Command completed successfully; action pending", null, cl);
     }
 
+
+
+    private String domainTransfer(
+            Session st,
+            Element obj,
+            Element ext,
+            String cl
+    ) {
+        String name = text(obj, "name");
+
+        Node parent = obj.getParentNode();
+
+        if (!(parent instanceof Element)) {
+            throw new RegistryException(
+                    2001,
+                    "Invalid transfer command"
+            );
+        }
+
+        Element transferCommand = (Element) parent;
+        String op = transferCommand.getAttribute("op");
+
+        if (op == null || op.isBlank()) {
+            throw new RegistryException(
+                    2001,
+                    "Transfer operation required"
+            );
+        }
+
+        String authInfo = null;
+
+        NodeList pwNodes = obj.getElementsByTagNameNS(
+                NS_DOMAIN,
+                "pw"
+        );
+
+        if (pwNodes.getLength() > 0) {
+            authInfo = pwNodes.item(0).getTextContent();
+        }
+
+        Registry.TransferView v =
+                reg.transferDomain(
+                        st.registrar,
+                        name,
+                        op,
+                        authInfo
+                );
+
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("<resData>");
+
+        if (v != null) {
+            sb.append("<domain:trnData")
+                    .append(" xmlns:domain=\"")
+                    .append(NS_DOMAIN)
+                    .append("\">");
+
+            sb.append("<domain:name>")
+                    .append(esc(v.name()))
+                    .append("</domain:name>");
+
+            sb.append("<domain:trStatus>")
+                    .append(esc(v.status()))
+                    .append("</domain:trStatus>");
+
+            sb.append("<domain:reID>")
+                    .append(esc(v.requester()))
+                    .append("</domain:reID>");
+
+            sb.append("<domain:reDate>")
+                    .append(date(v.requested()))
+                    .append("</domain:reDate>");
+
+            sb.append("<domain:acID>")
+                    .append(esc(v.sponsor()))
+                    .append("</domain:acID>");
+
+            sb.append("<domain:acDate>")
+                    .append(date(v.expires()))
+                    .append("</domain:acDate>");
+
+            sb.append("</domain:trnData>");
+        }
+
+        sb.append("</resData>");
+
+        return response(1000, "Command completed successfully", sb.toString(), cl);
+    }
 
     private String domainUpdate(
             Session st,
