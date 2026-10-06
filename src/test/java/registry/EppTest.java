@@ -79,7 +79,7 @@ class EppTest {
         }
 
         String login(String id, String pw) throws IOException {
-            return cmd("<login><clID>" + id + "</clID><pw>" + pw + "</pw></login>");
+            return cmd("<login><clID>" + id + "</clID><pw>" + pw + "</pw><options><version>1.0</version><lang>en</lang></options><svcs><objURI>urn:ietf:params:xml:ns:domain-1.0</objURI><objURI>urn:ietf:params:xml:ns:host-1.0</objURI><objURI>urn:ietf:params:xml:ns:contact-1.0</objURI><svcExtension><extURI>urn:ietf:params:xml:ns:rgp-1.0</extURI></svcExtension></svcs></login>");
         }
 
         @Override public void close() throws IOException { s.close(); }
@@ -212,7 +212,7 @@ class EppTest {
             c.read();
             assertTrue(c.sendRaw("<epp xmlns=\"urn:ietf:params:xml:ns:epp-1.0\"><hello/></epp>").contains("<greeting>"));
             c.login("reg1", PASS1);
-            assertEquals(2101, code(c.cmd("<poll op=\"req\"/>")));
+            assertEquals(1300, code(c.cmd("<poll op=\"req\"/>")));
         }
     }
 

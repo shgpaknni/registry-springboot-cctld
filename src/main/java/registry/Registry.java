@@ -1,5 +1,7 @@
 package registry;
 
+import java.sql.Statement;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -1424,5 +1426,130 @@ public final class Registry {
         byte[] b = new byte[12];
         RNG.nextBytes(b);
         return Base64.getUrlEncoder().withoutPadding().encodeToString(b);
+    }
+
+
+    // ================================================================
+    // RFC 5730 EPP Message Queue
+    // ================================================================
+
+    public long queueMessage(String registrar, String message) {
+        if (registrar == null || registrar.isBlank())
+            throw new RegistryException(2003, "Registrar required");
+
+        if (message == null || message.isBlank())
+            throw new RegistryException(2003, "Message required");
+
+        if (message.length() > 2000)
+            throw new RegistryException(2004, "Message too long");
+
+        try (Connection c = db.open();
+             PreparedStatement ps = c.prepareStatement(
+                     "INSERT INTO epp_message(registrar,qdate,message) VALUES(?,?,?)",
+                     Statement.RETURN_GENERATED_KEYS)) {
+
+            ps.setString(1, registrar);
+            ps.setLong(2, Instant.now(clock).getEpochSecond());
+            ps.setString(3, message);
+            ps.executeUpdate();
+
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (!rs.next())
+                    throw new RegistryException(2400, "Unable to queue EPP message");
+
+                long id = rs.getLong(1);
+                c.commit();
+                return id;
+            }
+
+        } catch (SQLException e) {
+            throw new RegistryException(2400, "Unable to queue EPP message");
+        }
+    }
+
+    public record PollMessage(
+            long id,
+            long qdate,
+            String message,
+            long count
+    ) {}
+
+    public Optional<PollMessage> pollMessage(String registrar) {
+        try (Connection c = db.open()) {
+
+            long count;
+
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT COUNT(*) FROM epp_message WHERE registrar=?")) {
+
+                ps.setString(1, registrar);
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                    count = rs.getLong(1);
+                }
+            }
+
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT id,qdate,message " +
+                    "FROM epp_message " +
+                    "WHERE registrar=? " +
+                    "ORDER BY id " +
+                    "LIMIT 1")) {
+
+                ps.setString(1, registrar);
+
+                try (ResultSet rs = ps.executeQuery()) {
+
+                    if (!rs.next()) {
+                        c.commit();
+                        return Optional.empty();
+                    }
+
+                    PollMessage result = new PollMessage(
+                            rs.getLong("id"),
+                            rs.getLong("qdate"),
+                            rs.getString("message"),
+                            count
+                    );
+
+                    c.commit();
+                    return Optional.of(result);
+                }
+            }
+
+        } catch (SQLException e) {
+            throw new RegistryException(
+                    2400,
+                    "Unable to read EPP message queue"
+            );
+        }
+    }
+
+    public void acknowledgeMessage(String registrar, long id) {
+        try (Connection c = db.open();
+             PreparedStatement ps = c.prepareStatement(
+                     "DELETE FROM epp_message " +
+                     "WHERE registrar=? AND id=?")) {
+
+            ps.setString(1, registrar);
+            ps.setLong(2, id);
+
+            if (ps.executeUpdate() == 0) {
+                c.rollback();
+                throw new RegistryException(
+                        2303,
+                        "Message does not exist"
+                );
+            }
+
+            c.commit();
+
+        } catch (SQLException e) {
+            throw new RegistryException(
+                    2400,
+                    "Unable to acknowledge EPP message"
+            );
+        }
     }
 }
