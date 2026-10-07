@@ -210,11 +210,7 @@ public final class EppServer implements AutoCloseable {
             if (e.code >= 2500) st.close = true;
             return response(e.code, e.getMessage(), null, cl);
         } catch (RuntimeException e) {
-            e.printStackTrace();
-            return response(2400,
-                    "Command failed: " + e.getClass().getSimpleName() + ": " + e.getMessage(),
-                    null,
-                    cl);
+            return response(2400, "Command failed", null, cl);
         }
     }
 
@@ -1271,7 +1267,6 @@ public final class EppServer implements AutoCloseable {
     }
     private static String date(long epoch) { return Instant.ofEpochSecond(epoch).toString(); }
 }
-
 
 
 

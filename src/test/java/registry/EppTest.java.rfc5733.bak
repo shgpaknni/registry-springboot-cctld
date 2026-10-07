@@ -109,7 +109,6 @@ class EppTest {
     }
 
     static int code(String xml) {
-        System.out.println("EPP CODE INPUT = " + xml);
         Matcher m = Pattern.compile("result code=\"(\\d+)\"").matcher(xml);
         assertTrue(m.find(), xml);
         return Integer.parseInt(m.group(1));
@@ -594,33 +593,6 @@ class EppTest {
                     r.contains("<domain:clID>reg2</domain:clID>"),
                     r
             );
-        }
-    }
-
-
-    @Test
-    void rfc5733ContactMapping() throws Exception {
-        try (Client c = new Client(clientCtx("reg1"), server.port())) {
-            c.read();
-            assertEquals(1000, code(c.login("reg1", PASS1)));
-            String create = "<create><contact:create xmlns:contact=\"urn:ietf:params:xml:ns:contact-1.0\">" +
-                    "<contact:id>rfc33</contact:id>" +
-                    "<contact:postalInfo type=\"int\"><contact:name>John Doe</contact:name><contact:org>Example Inc.</contact:org>" +
-                    "<contact:addr><contact:street>123 Main</contact:street><contact:street>Suite 2</contact:street><contact:city>Patna</contact:city><contact:sp>BR</contact:sp><contact:pc>800001</contact:pc><contact:cc>IN</contact:cc></contact:addr></contact:postalInfo>" +
-                    "<contact:postalInfo type=\"loc\"><contact:name>à¤œà¥‰à¤¨ à¤¡à¥‹</contact:name><contact:addr><contact:city>Patna</contact:city><contact:cc>IN</contact:cc></contact:addr></contact:postalInfo>" +
-                    "<contact:voice>+91.8000000000</contact:voice><contact:email>john@example.org</contact:email>" +
-                    "<contact:authInfo><contact:pw>contact-secret</contact:pw></contact:authInfo>" +
-                    "<contact:disclose flag=\"0\"><contact:email/><contact:voice/></contact:disclose>" +
-                    "</contact:create></create>";
-            String createResponse = c.cmd(create);
-            System.out.println("RFC5733 RESPONSE = " + createResponse);
-            assertEquals(1000, code(createResponse), createResponse);
-            String info=c.cmd("<info><contact:info xmlns:contact=\"urn:ietf:params:xml:ns:contact-1.0\"><contact:id>rfc33</contact:id></contact:info></info>");
-            assertEquals(1000, code(info)); assertTrue(info.contains("<contact:roid>RFC33-REP</contact:roid>"),info); assertTrue(info.contains("<contact:status s=\"ok\"/>"),info); assertTrue(info.contains("<contact:street>123 Main</contact:street>"),info); assertTrue(info.contains("<contact:email>john@example.org</contact:email>"),info); assertFalse(info.contains("contact-secret"),info);
-            String upd="<update><contact:update xmlns:contact=\"urn:ietf:params:xml:ns:contact-1.0\"><contact:id>rfc33</contact:id><contact:add><contact:status s=\"clientUpdateProhibited\"/></contact:add><contact:chg><contact:email>new@example.org</contact:email><contact:authInfo><contact:pw>new-secret</contact:pw></contact:authInfo></contact:chg></contact:update></update>";
-            assertEquals(1000,code(c.cmd(upd))); String info2=c.cmd("<info><contact:info xmlns:contact=\"urn:ietf:params:xml:ns:contact-1.0\"><contact:id>rfc33</contact:id><contact:authInfo><contact:pw>new-secret</contact:pw></contact:authInfo></contact:info></info>"); assertTrue(info2.contains("clientUpdateProhibited"),info2); assertTrue(info2.contains("new@example.org"),info2);
-            assertEquals(2003,code(c.cmd("<update><contact:update xmlns:contact=\"urn:ietf:params:xml:ns:contact-1.0\"><contact:id>rfc33</contact:id></contact:update></update>")));
-            assertEquals(1000,code(c.cmd("<delete><contact:delete xmlns:contact=\"urn:ietf:params:xml:ns:contact-1.0\"><contact:id>rfc33</contact:id></contact:delete></delete>")));
         }
     }
 
