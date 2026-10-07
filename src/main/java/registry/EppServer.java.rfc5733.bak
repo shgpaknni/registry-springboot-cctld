@@ -210,11 +210,7 @@ public final class EppServer implements AutoCloseable {
             if (e.code >= 2500) st.close = true;
             return response(e.code, e.getMessage(), null, cl);
         } catch (RuntimeException e) {
-            e.printStackTrace();
-            return response(2400,
-                    "Command failed: " + e.getClass().getSimpleName() + ": " + e.getMessage(),
-                    null,
-                    cl);
+            return response(2400, "Command failed", null, cl);
         }
     }
 
@@ -257,8 +253,6 @@ public final class EppServer implements AutoCloseable {
                     return contactUpdate(st, obj, cl);
                 case "delete":
                     return contactDelete(st, obj, cl);
-                case "transfer":
-                    return contactTransfer(st, cmd, obj, cl);
                 default:
                     break;
             }
@@ -1173,54 +1167,216 @@ public final class EppServer implements AutoCloseable {
     }
 
 
-    private String contactCheck(Session st, Element obj, String cl) {
-        List<String> ids=new ArrayList<>(); for(Element e:kids(obj)) if("id".equals(e.getLocalName())) ids.add(e.getTextContent().trim());
-        if(ids.isEmpty()) throw new RegistryException(2003,"Required parameter missing: id");
-        if(ids.size()>50) throw new RegistryException(2004,"At most 50 contact ids per check");
-        StringBuilder b=new StringBuilder("<resData><contact:chkData xmlns:contact=\""+NS_CONTACT+"\">");
-        for(Registry.ContactAvailability a:reg.checkContacts(st.registrar,ids)){b.append("<contact:cd><contact:id avail=\"").append(a.available()?"1":"0").append("\">").append(esc(a.id())).append("</contact:id>");if(!a.available()&&a.reason()!=null)b.append("<contact:reason>").append(esc(a.reason())).append("</contact:reason>");b.append("</contact:cd>");}
-        b.append("</contact:chkData></resData>"); return response(1000,"Command completed successfully",b.toString(),cl);
+    private String contactCheck(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        List<String> ids = new ArrayList<>();
+
+        for (Element e : kids(obj)) {
+            if ("id".equals(e.getLocalName()))
+                ids.add(e.getTextContent().trim());
+        }
+
+        if (ids.isEmpty())
+            throw new RegistryException(
+                    2003,
+                    "Required parameter missing: id"
+            );
+
+        if (ids.size() > 50)
+            throw new RegistryException(
+                    2004,
+                    "At most 50 contact ids per check"
+            );
+
+        List<Registry.ContactAvailability> result =
+                reg.checkContacts(st.registrar, ids);
+
+        StringBuilder sb = new StringBuilder(
+                "<resData><contact:chkData xmlns:contact=\"" +
+                NS_CONTACT + "\">"
+        );
+
+        for (Registry.ContactAvailability a : result) {
+            sb.append("<contact:cd>")
+              .append("<contact:id avail=\"")
+              .append(a.available() ? "1" : "0")
+              .append("\">")
+              .append(esc(a.id()))
+              .append("</contact:id>");
+
+            if (!a.available() && a.reason() != null) {
+                sb.append("<contact:reason>")
+                  .append(esc(a.reason()))
+                  .append("</contact:reason>");
+            }
+
+            sb.append("</contact:cd>");
+        }
+
+        sb.append("</contact:chkData></resData>");
+
+        return response(
+                1000,
+                "Command completed successfully",
+                sb.toString(),
+                cl
+        );
     }
 
-    private String contactInfo(Session st, Element obj, String cl) {
-        String id=need(obj,"id"); Registry.ContactView v=reg.contactInfo(st.registrar,id); StringBuilder b=new StringBuilder("<resData><contact:infData xmlns:contact=\""+NS_CONTACT+"\">");
-        b.append("<contact:id>").append(esc(v.id())).append("</contact:id><contact:roid>").append(esc(v.roid())).append("</contact:roid>");
-        for(String x:v.statuses()) b.append("<contact:status s=\"").append(esc(x)).append("\"/>");
-        appendPostal(b,"int",v.intName(),v.intOrg(),v.intStreet(),v.intCity(),v.intSp(),v.intPc(),v.intCc());
-        appendPostal(b,"loc",v.locName(),v.locOrg(),v.locStreet(),v.locCity(),v.locSp(),v.locPc(),v.locCc());
-        if(v.phone()!=null&&!v.phone().isBlank()) b.append("<contact:voice>").append(esc(v.phone())).append("</contact:voice>");
-        if(v.fax()!=null&&!v.fax().isBlank()) b.append("<contact:fax>").append(esc(v.fax())).append("</contact:fax>");
-        b.append("<contact:email>").append(esc(v.email())).append("</contact:email><contact:clID>").append(esc(v.sponsor())).append("</contact:clID><contact:crID>").append(esc(v.crId())).append("</contact:crID><contact:crDate>").append(date(v.created())).append("</contact:crDate>");
-        if(v.upId()!=null)b.append("<contact:upID>").append(esc(v.upId())).append("</contact:upID><contact:upDate>").append(date(v.updated())).append("</contact:upDate>");
-        if(st.registrar.equals(v.sponsor())){Element ai=kid(obj,"authInfo"); if(ai!=null&&kid(ai,"pw")!=null&&reg.verifyContactAuth(st.registrar,id,text(ai,"pw"))) b.append("<contact:authInfo><contact:pw>").append(esc(text(ai,"pw"))).append("</contact:pw></contact:authInfo>");}
-        if(v.discloseFlag()!=null&&v.disclose()!=null&&!v.disclose().isEmpty()){b.append("<contact:disclose flag=\"").append(v.discloseFlag()?"1":"0").append("\">");for(String x:v.disclose())appendDisclosure(b,x);b.append("</contact:disclose>");}
-        b.append("</contact:infData></resData>"); return response(1000,"Command completed successfully",b.toString(),cl);
+    private String contactInfo(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        Registry.ContactView v =
+                reg.contactInfo(
+                        st.registrar,
+                        need(obj, "id")
+                );
+
+        StringBuilder sb = new StringBuilder(
+                "<resData><contact:infData xmlns:contact=\"" +
+                NS_CONTACT + "\">"
+        );
+
+        sb.append("<contact:id>")
+          .append(esc(v.id()))
+          .append("</contact:id>");
+
+        sb.append("<contact:roid>")
+          .append(esc(v.id()))
+          .append("</contact:roid>");
+
+        sb.append("<contact:status s=\"ok\"/>");
+
+        sb.append("<contact:postalInfo type=\"loc\">")
+          .append("<contact:name>")
+          .append(esc(v.name()))
+          .append("</contact:name>");
+
+        if (v.org() != null && !v.org().isBlank()) {
+            sb.append("<contact:org>")
+              .append(esc(v.org()))
+              .append("</contact:org>");
+        }
+
+        sb.append("<contact:addr>")
+          .append("<contact:cc>")
+          .append(esc(v.country()))
+          .append("</contact:cc>")
+          .append("</contact:addr>")
+          .append("</contact:postalInfo>");
+
+        if (v.phone() != null && !v.phone().isBlank()) {
+            sb.append("<contact:voice>")
+              .append(esc(v.phone()))
+              .append("</contact:voice>");
+        }
+
+        sb.append("<contact:email>")
+          .append(esc(v.email()))
+          .append("</contact:email>");
+
+        sb.append("<contact:clID>")
+          .append(esc(v.sponsor()))
+          .append("</contact:clID>");
+
+        sb.append("<contact:crDate>")
+          .append(date(v.created()))
+          .append("</contact:crDate>");
+
+        sb.append("</contact:infData></resData>");
+
+        return response(
+                1000,
+                "Command completed successfully",
+                sb.toString(),
+                cl
+        );
+    }
+
+    private String contactUpdate(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        String id = need(obj, "id");
+
+        Element chg = kid(obj, "chg");
+
+        String name = null;
+        String org = null;
+        String email = null;
+        String phone = null;
+        String country = null;
+
+        if (chg != null) {
+            Element pi = kid(chg, "postalInfo");
+
+            if (pi != null) {
+                name = text(pi, "name");
+                org = text(pi, "org");
+
+                Element addr = kid(pi, "addr");
+
+                if (addr != null)
+                    country = text(addr, "cc");
+            }
+
+            email = text(chg, "email");
+            phone = text(chg, "voice");
+        }
+
+        reg.updateContact(
+                st.registrar,
+                id,
+                name,
+                org,
+                email,
+                phone,
+                country
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
+    }
+
+    private String contactDelete(
+            Session st,
+            Element obj,
+            String cl
+    ) {
+        reg.deleteContact(
+                st.registrar,
+                need(obj, "id")
+        );
+
+        return response(
+                1000,
+                "Command completed successfully",
+                null,
+                cl
+        );
     }
 
     private String contactCreate(Session st, Element obj, String cl) {
-        String id=need(obj,"id"), email=need(obj,"email"); List<Element> pis=new ArrayList<>(); for(Element e:kids(obj))if("postalInfo".equals(e.getLocalName()))pis.add(e); if(pis.size()<1||pis.size()>2)throw new RegistryException(2003,"One or two postalInfo elements are required");
-        String in=null,io=null,ic=null,isp=null,ipc=null,icc=null,ln=null,lo=null,lc=null,lsp=null,lpc=null,lcc=null; List<String> is=List.of(),ls=List.of();
-        for(Element pi:pis){String t=pi.getAttribute("type");if(!"int".equals(t)&&!"loc".equals(t))throw new RegistryException(2005,"Invalid postalInfo type");Element a=kid(pi,"addr");if(a==null)throw new RegistryException(2003,"Postal address is required");List<String> stt=new ArrayList<>();for(Element q:kids(a))if("street".equals(q.getLocalName()))stt.add(q.getTextContent().trim());String n=text(pi,"name"),o=text(pi,"org"),city=text(a,"city"),sp=text(a,"sp"),pc=text(a,"pc"),cc=text(a,"cc");if("int".equals(t)){in=n;io=o;is=stt;ic=city;isp=sp;ipc=pc;icc=cc;}else{ln=n;lo=o;ls=stt;lc=city;lsp=sp;lpc=pc;lcc=cc;}}
-        Element ai=kid(obj,"authInfo");String pw=ai==null?null:text(ai,"pw");Element d=kid(obj,"disclose");Boolean df=d==null?null:parseBool(d.getAttribute("flag"));List<String>dv=parseDisclosure(d);reg.createContactRich(st.registrar,id,in,io,street(is,0),is,ic,isp,ipc,icc,ln,lo,street(ls,0),ls,lc,lsp,lpc,lcc,text(obj,"voice"),text(obj,"fax"),email,pw,df,dv);
-        return response(1000,"Command completed successfully","<resData><contact:creData xmlns:contact=\""+NS_CONTACT+"\"><contact:id>"+esc(id)+"</contact:id><contact:crDate>"+date(Instant.now(reg.clock()).getEpochSecond())+"</contact:crDate></contact:creData></resData>",cl);
+        Element pi = kid(obj, "postalInfo");
+        if (pi == null) throw new RegistryException(2003, "Required parameter missing: postalInfo");
+        Element addr = kid(pi, "addr");
+        reg.createContact(st.registrar, need(obj, "id"), text(pi, "name"), text(pi, "org"), text(obj, "email"), text(obj, "voice"),
+                addr == null ? null : text(addr, "cc"));
+        String body = "<resData><contact:creData xmlns:contact=\"" + NS_CONTACT + "\"><contact:id>" + esc(text(obj, "id")) + "</contact:id><contact:crDate>"
+                + Instant.now(reg.clock()).truncatedTo(java.time.temporal.ChronoUnit.SECONDS) + "</contact:crDate></contact:creData></resData>";
+        return response(1000, "Command completed successfully", body, cl);
     }
 
-    private String contactUpdate(Session st, Element obj, String cl){
-        String id=need(obj,"id"); Element add=kid(obj,"add"),rem=kid(obj,"rem"),chg=kid(obj,"chg");List<String>as=parseStatuses(add),rs=parseStatuses(rem);String in=null,io=null,ic=null,isp=null,ipc=null,icc=null,ln=null,lo=null,lc=null,lsp=null,lpc=null,lcc=null,phone=null,fax=null,email=null,auth=null;List<String>is=null,ls=null;Boolean df=null;List<String>dv=null;
-        if(chg!=null){for(Element pi:kids(chg))if("postalInfo".equals(pi.getLocalName())){String t=pi.getAttribute("type");Element a=kid(pi,"addr");List<String>ss=new ArrayList<>();if(a!=null)for(Element q:kids(a))if("street".equals(q.getLocalName()))ss.add(q.getTextContent().trim());if("int".equals(t)){in=text(pi,"name");io=text(pi,"org");is=ss;ic=text(a,"city");isp=text(a,"sp");ipc=text(a,"pc");icc=text(a,"cc");}else if("loc".equals(t)){ln=text(pi,"name");lo=text(pi,"org");ls=ss;lc=text(a,"city");lsp=text(a,"sp");lpc=text(a,"pc");lcc=text(a,"cc");}else throw new RegistryException(2005,"Invalid postalInfo type");} phone=text(chg,"voice");fax=text(chg,"fax");email=text(chg,"email");Element ai=kid(chg,"authInfo");if(ai!=null)auth=text(ai,"pw");Element d=kid(chg,"disclose");if(d!=null){df=parseBool(d.getAttribute("flag"));dv=parseDisclosure(d);}}
-        reg.updateContact(st.registrar,id,in,io,is,ic,isp,ipc,icc,ln,lo,ls,lc,lsp,lpc,lcc,phone,fax,email,auth,as,rs,df,dv);return response(1000,"Command completed successfully",null,cl);
-    }
-
-    private String contactDelete(Session st, Element obj, String cl){reg.deleteContact(st.registrar,need(obj,"id"));return response(1000,"Command completed successfully",null,cl);}
-
-    private String contactTransfer(Session st, Element cmd, Element obj, String cl){String op=cmd.getAttribute("op");if(op==null||op.isBlank())op="query";String auth=null;Element ai=kid(obj,"authInfo");if(ai!=null)auth=text(ai,"pw");Registry.ContactTransferView v=reg.transferContact(st.registrar,need(obj,"id"),op,auth);String body="<resData><contact:trnData xmlns:contact=\""+NS_CONTACT+"\"><contact:id>"+esc(v.id())+"</contact:id><contact:trStatus>"+esc(v.status())+"</contact:trStatus><contact:reID>"+esc(v.requester())+"</contact:reID><contact:reDate>"+date(v.requested())+"</contact:reDate><contact:acID>"+esc(v.sponsor())+"</contact:acID><contact:acDate>"+date(v.expires())+"</contact:acDate></contact:trnData></resData>";return response(1000,"Command completed successfully",body,cl);}
-
-    private static void appendPostal(StringBuilder b,String type,String name,String org,List<String>street,String city,String sp,String pc,String cc){if(name==null)return;b.append("<contact:postalInfo type=\"").append(type).append("\"><contact:name>").append(esc(name)).append("</contact:name>");if(org!=null)b.append("<contact:org>").append(esc(org)).append("</contact:org>");b.append("<contact:addr>");for(String x:street)b.append("<contact:street>").append(esc(x)).append("</contact:street>");b.append("<contact:city>").append(esc(city)).append("</contact:city>");if(sp!=null)b.append("<contact:sp>").append(esc(sp)).append("</contact:sp>");if(pc!=null)b.append("<contact:pc>").append(esc(pc)).append("</contact:pc>");b.append("<contact:cc>").append(esc(cc)).append("</contact:cc></contact:addr></contact:postalInfo>");}
-    private static List<String> parseStatuses(Element e){List<String>r=new ArrayList<>();if(e!=null)for(Element q:kids(e))if("status".equals(q.getLocalName()))r.add(q.getAttribute("s"));return r;}
-    private static List<String> parseDisclosure(Element d){List<String>r=new ArrayList<>();if(d==null)return r;for(Element q:kids(d)){String n=q.getLocalName(),t=q.getAttribute("type");if("name".equals(n)||"org".equals(n)||"addr".equals(n))r.add(n+":"+t);else if("voice".equals(n)||"fax".equals(n)||"email".equals(n))r.add(n);}return r;}
-    private static void appendDisclosure(StringBuilder b,String x){int i=x.indexOf(':');if(i>0)b.append("<contact:").append(x.substring(0,i)).append(" type=\"").append(x.substring(i+1)).append("\"/>");else b.append("<contact:").append(x).append("/>");}
-    private static Boolean parseBool(String x){if("1".equals(x)||"true".equalsIgnoreCase(x))return true;if("0".equals(x)||"false".equalsIgnoreCase(x))return false;throw new RegistryException(2005,"Invalid boolean value");}
-    private static String street(List<String>s,int i){return s!=null&&i<s.size()?s.get(i):null;}
 
     private List<Registry.DsData> parseSecDnsDs(Element parent) {
         if (parent == null) return List.of();
@@ -1271,7 +1427,6 @@ public final class EppServer implements AutoCloseable {
     }
     private static String date(long epoch) { return Instant.ofEpochSecond(epoch).toString(); }
 }
-
 
 
 

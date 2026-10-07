@@ -86,7 +86,6 @@ public final class Registry {
                 throw e;
             } catch (Exception e) {
                 c.rollback();
-                e.printStackTrace();
                 throw new RegistryException(2400, "Command failed: " + e.getMessage(), e);
             }
         } catch (SQLException e) {
@@ -274,180 +273,22 @@ public final class Registry {
         if (r.isEmpty() || !"ACTIVE".equals(r.get(0)[0])) throw new RegistryException(2201, "Authorization error: registrar not active");
     }
 
-    // ---------------------------------------------------------------- RFC 5733 contacts
-
-    public record ContactAvailability(String id, boolean available, String reason) {}
-
-    public record ContactView(
-            String id, String roid, String sponsor, String crId, String upId,
-            long created, Long updated,
-            String intName, String intOrg, List<String> intStreet, String intCity, String intSp, String intPc, String intCc,
-            String locName, String locOrg, List<String> locStreet, String locCity, String locSp, String locPc, String locCc,
-            String phone, String fax, String email, List<String> statuses,
-            Boolean discloseFlag, List<String> disclose
-    ) {}
-
-    public record ContactTransferView(
-            String id, String status, String requester, String sponsor, long requested, long expires
-    ) {}
-
-    private static final Set<String> CONTACT_STATUSES = Set.of(
-            "clientDeleteProhibited", "clientTransferProhibited", "clientUpdateProhibited"
-    );
-
-    private static final Set<String> DISCLOSE_VALUES = Set.of(
-            "name:int", "name:loc", "org:int", "org:loc", "addr:int", "addr:loc", "voice", "fax", "email"
-    );
-
-    public boolean verifyContactAuth(String registrar,String id,String authInfo){ return read(c->{List<Object[]>r=rows(c,"SELECT sponsor,authinfo_hash FROM contact c JOIN contact_details d ON d.contact_id=c.id WHERE c.id=?",id);if(r.isEmpty()||!registrar.equals(r.get(0)[0]))return false;return authInfo!=null&&Pw.verify(authInfo,(String)r.get(0)[1]);}); }
-
-    public List<ContactAvailability> checkContacts(String registrar, List<String> ids) {
-        return read(c -> {
-            requireActive(c, registrar);
-            List<ContactAvailability> out = new ArrayList<>();
-            for (String id : ids) {
-                boolean valid = ID.matcher(String.valueOf(id)).matches();
-                boolean exists = valid && !rows(c, "SELECT 1 FROM contact WHERE id=?", id).isEmpty();
-                out.add(new ContactAvailability(id, !exists, exists ? "In use" : null));
-            }
-            return out;
-        });
-    }
+    // ---------------------------------------------------------------- contacts
 
     public void createContact(String registrar, String id, String name, String org, String email, String phone, String country) {
-        // Compatibility wrapper for existing callers/tests.
-        createContactRich(
-                registrar, id,
-                name, org, null, List.of("1 Main"), "Bengaluru", null, null, country,
-                null, null, null, List.of(), null, null, null, country,
-                phone, null, email, "contact-secret-1", null, List.of()
-        );
-    }
-
-    public void createContactRich(
-            String registrar, String id,
-            String intName, String intOrg, String intStreet1, List<String> intStreets,
-            String intCity, String intSp, String intPc, String intCc,
-            String locName, String locOrg, String locStreet1, List<String> locStreets,
-            String locCity, String locSp, String locPc, String locCc,
-            String phone, String fax, String email, String authInfo,
-            Boolean discloseFlag, List<String> disclose
-    ) {
         if (!ID.matcher(String.valueOf(id)).matches()) throw new RegistryException(2005, "Invalid contact id");
+        if (name == null || name.isBlank()) throw new RegistryException(2003, "Missing contact name");
         if (email == null || !EMAIL.matcher(email).matches()) throw new RegistryException(2005, "Invalid email");
-        if (authInfo != null && authInfo.length() < 8) throw new RegistryException(2003, "Contact AuthInfo of at least 8 characters required");
-        validatePostal(intName, intCity, intCc, intStreets, intSp, intPc);
-        validatePostal(locName, locCity, locCc, locStreets, locSp, locPc);
-        if ((intName == null || intName.isBlank()) && (locName == null || locName.isBlank()))
-            throw new RegistryException(2003, "At least one postalInfo is required");
-        validateDisclosure(discloseFlag, disclose);
+        if (country == null || !country.matches("[A-Z]{2}")) throw new RegistryException(2005, "Invalid country code");
         tx(c -> {
             requireActive(c, registrar);
             if (!rows(c, "SELECT 1 FROM contact WHERE id=?", id).isEmpty()) throw new RegistryException(2302, "Contact exists");
-            long now=now();
-            update(c,"INSERT INTO contact(id,sponsor,name,org,email,phone,country,created) VALUES(?,?,?,?,?,?,?,?)",
-                    id,registrar,first(intName,locName),first(intOrg,locOrg),email,phone,first(intCc,locCc),now);
-            update(c,"INSERT INTO contact_details(contact_id,roid,authinfo_hash,cr_id,created,updated,int_name,int_org,int_street1,int_street2,int_street3,int_city,int_sp,int_pc,int_cc,loc_name,loc_org,loc_street1,loc_street2,loc_street3,loc_city,loc_sp,loc_pc,loc_cc,fax,disclose_flag,disclose) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    id, id.toUpperCase(Locale.ROOT)+"-REP", Pw.hash(authInfo == null ? "contact-internal-" + id : authInfo,cfg.pbkdf2Iterations()), registrar, now, null,
-                    intName,intOrg,street(intStreets,0),street(intStreets,1),street(intStreets,2),intCity,intSp,intPc,intCc,
-                    locName,locOrg,street(locStreets,0),street(locStreets,1),street(locStreets,2),locCity,locSp,locPc,locCc,
-                    fax,discloseFlag,joinCsv(disclose));
-            audit(c,registrar,"CONTACT_CREATE",id,"");
+            update(c, "INSERT INTO contact(id,sponsor,name,org,email,phone,country,created) VALUES(?,?,?,?,?,?,?,?)",
+                    id, registrar, name, org, email, phone, country, now());
+            audit(c, registrar, "CONTACT_CREATE", id, "");
             return null;
         });
     }
-
-    public ContactView contactInfo(String registrar, String id) {
-        return read(c -> {
-            List<Object[]> r=rows(c,"SELECT c.id,c.sponsor,c.email,c.phone,c.created,d.roid,d.cr_id,d.up_id,d.updated,d.int_name,d.int_org,d.int_street1,d.int_street2,d.int_street3,d.int_city,d.int_sp,d.int_pc,d.int_cc,d.loc_name,d.loc_org,d.loc_street1,d.loc_street2,d.loc_street3,d.loc_city,d.loc_sp,d.loc_pc,d.loc_cc,d.fax,d.disclose_flag,d.disclose FROM contact c JOIN contact_details d ON d.contact_id=c.id WHERE c.id=?",id);
-            if(r.isEmpty()) throw new RegistryException(2303,"Object does not exist");
-            Object[] x=r.get(0); String sponsor=(String)x[1];
-            boolean owner=registrar.equals(sponsor);
-            List<String> statuses=new ArrayList<>();
-            for(Object[] q:rows(c,"SELECT status FROM contact_status WHERE contact_id=? ORDER BY status",id)) statuses.add((String)q[0]);
-            boolean linked=!rows(c,"SELECT 1 FROM domains WHERE registrant=? LIMIT 1",id).isEmpty();
-            if(linked) statuses.add("linked");
-            if(statuses.isEmpty()) statuses.add("ok");
-            return new ContactView(id,(String)x[5],sponsor,(String)x[6],(String)x[7],num(x[4]),x[8]==null?null:num(x[8]),
-                    (String)x[9],(String)x[10],streets((String)x[11],(String)x[12],(String)x[13]),(String)x[14],(String)x[15],(String)x[16],(String)x[17],
-                    (String)x[18],(String)x[19],streets((String)x[20],(String)x[21],(String)x[22]),(String)x[23],(String)x[24],(String)x[25],(String)x[26],
-                    (String)x[3],(String)x[27],(String)x[2],statuses,(Boolean)x[28],splitCsv((String)x[29]));
-        });
-    }
-
-    public void updateContact(
-            String registrar, String id,
-            String intName, String intOrg, List<String> intStreets, String intCity, String intSp, String intPc, String intCc,
-            String locName, String locOrg, List<String> locStreets, String locCity, String locSp, String locPc, String locCc,
-            String phone, String fax, String email, String authInfo,
-            List<String> addStatus, List<String> remStatus,
-            Boolean discloseFlag, List<String> disclose
-    ) {
-        if (addStatus.isEmpty() && remStatus.isEmpty() && intName==null && intOrg==null && intStreets==null && intCity==null && intSp==null && intPc==null && intCc==null && locName==null && locOrg==null && locStreets==null && locCity==null && locSp==null && locPc==null && locCc==null && phone==null && fax==null && email==null && authInfo==null && discloseFlag==null)
-            throw new RegistryException(2003,"At least one add, rem, or chg element is required");
-        validateDisclosure(discloseFlag,disclose);
-        tx(c -> {
-            requireActive(c,registrar);
-            List<Object[]> owner=rows(c,"SELECT sponsor FROM contact WHERE id=?",id);
-            if(owner.isEmpty()) throw new RegistryException(2303,"Object does not exist");
-            if(!registrar.equals(owner.get(0)[0])) throw new RegistryException(2201,"Authorization error");
-            List<Object[]> st=rows(c,"SELECT status FROM contact_status WHERE contact_id=?",id);
-            Set<String> cur=new TreeSet<>(); for(Object[] q:st) cur.add((String)q[0]);
-            for(String v:addStatus){if(!CONTACT_STATUSES.contains(v)) throw new RegistryException(2004,"Invalid contact status"); if(!cur.add(v)) throw new RegistryException(2304,"Status already present");}
-            for(String v:remStatus){if(!CONTACT_STATUSES.contains(v)) throw new RegistryException(2004,"Invalid contact status"); if(!cur.remove(v)) throw new RegistryException(2304,"Status not present");}
-            update(c,"DELETE FROM contact_status WHERE contact_id=?",id);
-            for(String v:cur) update(c,"INSERT INTO contact_status(contact_id,status) VALUES(?,?)",id,v);
-            if(!rows(c,"SELECT 1 FROM contact_details WHERE contact_id=?",id).isEmpty()){
-                List<Object[]> old=rows(c,"SELECT int_name,int_org,int_street1,int_street2,int_street3,int_city,int_sp,int_pc,int_cc,loc_name,loc_org,loc_street1,loc_street2,loc_street3,loc_city,loc_sp,loc_pc,loc_cc,c.phone,fax,email,disclose_flag,disclose FROM contact_details d JOIN contact c ON c.id=d.contact_id WHERE d.contact_id=?",id);
-                Object[] o=old.get(0);
-                String nInt=intName!=null?intName:(String)o[0], oInt=intOrg!=null?intOrg:(String)o[1], nLoc=locName!=null?locName:(String)o[9], oLoc=locOrg!=null?locOrg:(String)o[10];
-                String ph=phone!=null?phone:(String)o[18], fx=fax!=null?fax:(String)o[19], em=email!=null?email:(String)o[20];
-                if(em!=null&&!EMAIL.matcher(em).matches()) throw new RegistryException(2005,"Invalid email");
-                update(c,"UPDATE contact SET name=?,org=?,email=?,phone=?,country=? WHERE id=?",first(nInt,nLoc),first(oInt,oLoc),em,ph,first((String)o[8],(String)o[17]),id);
-                update(c,"UPDATE contact_details SET int_name=?,int_org=?,int_street1=?,int_street2=?,int_street3=?,int_city=?,int_sp=?,int_pc=?,int_cc=?,loc_name=?,loc_org=?,loc_street1=?,loc_street2=?,loc_street3=?,loc_city=?,loc_sp=?,loc_pc=?,loc_cc=?,fax=?,disclose_flag=?,disclose=?,up_id=?,updated=?,authinfo_hash=? WHERE contact_id=?",
-                        nInt,oInt,streetValue(intStreets,0,(String)o[2]),streetValue(intStreets,1,(String)o[3]),streetValue(intStreets,2,(String)o[4]),intCity!=null?intCity:(String)o[5],intSp!=null?intSp:(String)o[6],intPc!=null?intPc:(String)o[7],intCc!=null?intCc:(String)o[8],
-                        nLoc,oLoc,streetValue(locStreets,0,(String)o[11]),streetValue(locStreets,1,(String)o[12]),streetValue(locStreets,2,(String)o[13]),locCity!=null?locCity:(String)o[14],locSp!=null?locSp:(String)o[15],locPc!=null?locPc:(String)o[16],locCc!=null?locCc:(String)o[17],fx,discloseFlag!=null?discloseFlag:o[21],discloseFlag!=null?joinCsv(disclose):o[22],registrar,now(),authInfo!=null?Pw.hash(authInfo == null ? "contact-internal-" + id : authInfo,cfg.pbkdf2Iterations()):contactAuthHash(c,id),id);
-            }
-            audit(c,registrar,"CONTACT_UPDATE",id,""); return null;
-        });
-    }
-
-    public void deleteContact(String registrar,String id){
-        tx(c->{requireActive(c,registrar); List<Object[]> r=rows(c,"SELECT sponsor FROM contact WHERE id=?",id); if(r.isEmpty()) throw new RegistryException(2303,"Object does not exist"); if(!registrar.equals(r.get(0)[0])) throw new RegistryException(2201,"Authorization error"); if(!rows(c,"SELECT 1 FROM domains WHERE registrant=? LIMIT 1",id).isEmpty()) throw new RegistryException(2305,"Object association exists"); update(c,"DELETE FROM contact WHERE id=?",id); audit(c,registrar,"CONTACT_DELETE",id,""); return null;});
-    }
-
-    public ContactTransferView transferContact(String registrar,String id,String op,String authInfo){
-        return tx(c->{requireActive(c,registrar); List<Object[]> r=rows(c,"SELECT sponsor FROM contact WHERE id=?",id); if(r.isEmpty()) throw new RegistryException(2303,"Object does not exist"); String sponsor=(String)r.get(0)[0]; long now=now();
-            List<Object[]> p=rows(c,"SELECT requester,sponsor,requested,expires,status FROM contact_transfer WHERE contact_id=?",id);
-            if(!p.isEmpty() && num(p.get(0)[3])<=now){update(c,"DELETE FROM contact_transfer WHERE contact_id=?",id);p=List.of();}
-            switch(op){
-                case "request" -> {if(registrar.equals(sponsor)) throw new RegistryException(2306,"Already sponsoring client"); if(!p.isEmpty()) throw new RegistryException(2302,"Transfer pending"); if(authInfo==null||!verifyContactAuth(c,id,authInfo)) throw new RegistryException(2202,"Invalid authorization information"); long exp=now+5L*86400; update(c,"INSERT INTO contact_transfer(contact_id,requester,sponsor,requested,expires,status) VALUES(?,?,?,?,?,'pending')",id,registrar,sponsor,now,exp); return new ContactTransferView(id,"pending",registrar,sponsor,now,exp);}
-                case "query" -> {if(p.isEmpty()) throw new RegistryException(2303,"No transfer history"); Object[]x=p.get(0); if(!registrar.equals(x[0])&&!registrar.equals(x[1])) throw new RegistryException(2201,"Authorization error"); return new ContactTransferView(id,(String)x[4],(String)x[0],(String)x[1],num(x[2]),num(x[3]));}
-                case "cancel" -> {if(p.isEmpty()) throw new RegistryException(2303,"No pending transfer"); if(!registrar.equals(p.get(0)[0])) throw new RegistryException(2201,"Authorization error"); update(c,"DELETE FROM contact_transfer WHERE contact_id=?",id); return new ContactTransferView(id,"cancelled",(String)p.get(0)[0],(String)p.get(0)[1],num(p.get(0)[2]),num(p.get(0)[3]));}
-                case "approve" -> {if(p.isEmpty()) throw new RegistryException(2303,"No pending transfer"); if(!registrar.equals(sponsor)) throw new RegistryException(2201,"Authorization error"); update(c,"UPDATE contact SET sponsor=? WHERE id=?",p.get(0)[0],id); update(c,"DELETE FROM contact_transfer WHERE contact_id=?",id); return new ContactTransferView(id,"approved",(String)p.get(0)[0],sponsor,num(p.get(0)[2]),num(p.get(0)[3]));}
-                case "reject" -> {if(p.isEmpty()) throw new RegistryException(2303,"No pending transfer"); if(!registrar.equals(sponsor)) throw new RegistryException(2201,"Authorization error"); update(c,"DELETE FROM contact_transfer WHERE contact_id=?",id); return new ContactTransferView(id,"rejected",(String)p.get(0)[0],sponsor,num(p.get(0)[2]),num(p.get(0)[3]));}
-                default -> throw new RegistryException(2004,"Invalid contact transfer operation");
-            }
-        });
-    }
-
-    private boolean verifyContactAuth(Connection c,String id,String auth) throws SQLException {List<Object[]>r=rows(c,"SELECT authinfo_hash FROM contact_details WHERE contact_id=?",id); return !r.isEmpty()&&Pw.verify(auth,(String)r.get(0)[0]);}
-
-    private String contactAuthHash(Connection c,String id) throws SQLException { List<Object[]> r=rows(c,"SELECT authinfo_hash FROM contact_details WHERE contact_id=?",id); return r.isEmpty()?Pw.hash("contact-secret-1",cfg.pbkdf2Iterations()):(String)r.get(0)[0]; }
-
-    private static void validatePostal(String name,String city,String cc,List<String> streets,String sp,String pc){
-        if(name==null||name.isBlank()) return;
-        if(city==null||city.isBlank()) throw new RegistryException(2003,"Postal city is required");
-        if(cc==null||!cc.matches("[A-Z]{2}")) throw new RegistryException(2005,"Invalid country code");
-        if(streets!=null&&streets.size()>3) throw new RegistryException(2004,"At most 3 street elements are allowed");
-    }
-    private static void validateDisclosure(Boolean flag,List<String> vals){if(flag==null)return;if(vals==null||vals.isEmpty())throw new RegistryException(2308,"Disclosure requires at least one element");for(String v:vals)if(!DISCLOSE_VALUES.contains(v))throw new RegistryException(2004,"Invalid disclosure element");}
-    private static String first(String a,String b){return a!=null&&!a.isBlank()?a:b;}
-    private static String street(List<String>s,int i){return s!=null&&i<s.size()?s.get(i):null;}
-    private static String streetValue(List<String>s,int i,String old){return s==null?old:street(s,i);}
-    private static List<String> streets(String a,String b,String c){List<String> r=new ArrayList<>(); if(a!=null&&!a.isBlank())r.add(a); if(b!=null&&!b.isBlank())r.add(b); if(c!=null&&!c.isBlank())r.add(c); return r;}
-    private static String joinCsv(List<String>x){return x==null?null:String.join(",",x);}
-    private static List<String> splitCsv(String x){return x==null||x.isBlank()?new ArrayList<>():new ArrayList<>(Arrays.asList(x.split(",")));}
 
     // ---------------------------------------------------------------- RFC 5732 HOST OBJECTS
 
@@ -991,6 +832,181 @@ public final class Registry {
 
         read(c -> {
             requireActive(c, registrar);
+            return null;
+        });
+    }
+
+    // ---------------------------------------------------------------- RFC 5733 contact commands
+
+    public record ContactView(
+            String id,
+            String sponsor,
+            String name,
+            String org,
+            String email,
+            String phone,
+            String country,
+            long created
+    ) {}
+
+    public record ContactAvailability(String id, boolean available, String reason) {}
+
+    public List<ContactAvailability> checkContacts(String registrar, List<String> ids) {
+        return read(c -> {
+            requireActive(c, registrar);
+            List<ContactAvailability> out = new ArrayList<>();
+
+            for (String id : ids) {
+                if (!ID.matcher(String.valueOf(id)).matches()) {
+                    out.add(new ContactAvailability(String.valueOf(id), false, "Invalid contact id"));
+                    continue;
+                }
+
+                boolean exists = !rows(c,
+                        "SELECT 1 FROM contact WHERE id=?",
+                        id).isEmpty();
+
+                out.add(new ContactAvailability(
+                        id,
+                        !exists,
+                        exists ? "Contact exists" : null
+                ));
+            }
+
+            return out;
+        });
+    }
+
+    public ContactView contactInfo(String registrar, String id) {
+        if (!ID.matcher(String.valueOf(id)).matches())
+            throw new RegistryException(2005, "Invalid contact id");
+
+        return read(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> r = rows(c,
+                    "SELECT id,sponsor,name,org,email,phone,country,created " +
+                    "FROM contact WHERE id=?",
+                    id);
+
+            if (r.isEmpty())
+                throw new RegistryException(2303, "Contact does not exist");
+
+            Object[] x = r.get(0);
+
+            if (!registrar.equals(x[1]))
+                throw new RegistryException(2201,
+                        "Authorization error: not the sponsoring registrar");
+
+            return new ContactView(
+                    (String) x[0],
+                    (String) x[1],
+                    (String) x[2],
+                    (String) x[3],
+                    (String) x[4],
+                    (String) x[5],
+                    (String) x[6],
+                    num(x[7])
+            );
+        });
+    }
+
+    public ContactView updateContact(
+            String registrar,
+            String id,
+            String name,
+            String org,
+            String email,
+            String phone,
+            String country
+    ) {
+        if (!ID.matcher(String.valueOf(id)).matches())
+            throw new RegistryException(2005, "Invalid contact id");
+
+        if (name != null && name.isBlank())
+            throw new RegistryException(2003, "Contact name cannot be empty");
+
+        if (email != null && !EMAIL.matcher(email).matches())
+            throw new RegistryException(2005, "Invalid email");
+
+        if (country != null && !country.matches("[A-Z]{2}"))
+            throw new RegistryException(2005, "Invalid country code");
+
+        return tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> r = rows(c,
+                    "SELECT id,sponsor,name,org,email,phone,country,created " +
+                    "FROM contact WHERE id=?",
+                    id);
+
+            if (r.isEmpty())
+                throw new RegistryException(2303, "Contact does not exist");
+
+            Object[] old = r.get(0);
+
+            if (!registrar.equals(old[1]))
+                throw new RegistryException(2201,
+                        "Authorization error: not the sponsoring registrar");
+
+            String nName = name != null ? name : (String) old[2];
+            String nOrg = org != null ? org : (String) old[3];
+            String nEmail = email != null ? email : (String) old[4];
+            String nPhone = phone != null ? phone : (String) old[5];
+            String nCountry = country != null ? country : (String) old[6];
+
+            update(c,
+                    "UPDATE contact SET name=?,org=?,email=?,phone=?,country=? WHERE id=?",
+                    nName, nOrg, nEmail, nPhone, nCountry, id);
+
+            audit(c, registrar, "CONTACT_UPDATE", id,
+                    "contact data updated");
+
+            return new ContactView(
+                    id,
+                    registrar,
+                    nName,
+                    nOrg,
+                    nEmail,
+                    nPhone,
+                    nCountry,
+                    num(old[7])
+            );
+        });
+    }
+
+    public void deleteContact(String registrar, String id) {
+        if (!ID.matcher(String.valueOf(id)).matches())
+            throw new RegistryException(2005, "Invalid contact id");
+
+        tx(c -> {
+            requireActive(c, registrar);
+
+            List<Object[]> r = rows(c,
+                    "SELECT sponsor FROM contact WHERE id=?",
+                    id);
+
+            if (r.isEmpty())
+                throw new RegistryException(2303, "Contact does not exist");
+
+            if (!registrar.equals(r.get(0)[0]))
+                throw new RegistryException(2201,
+                        "Authorization error: not the sponsoring registrar");
+
+            boolean used = !rows(c,
+                    "SELECT 1 FROM domains WHERE registrant=?",
+                    id).isEmpty();
+
+            if (used)
+                throw new RegistryException(2306,
+                        "Contact is referenced by a domain");
+
+            update(c,
+                    "DELETE FROM contact WHERE id=?",
+                    id);
+
+            audit(c, registrar, "CONTACT_DELETE", id, "");
+
             return null;
         });
     }
@@ -2088,7 +2104,6 @@ public final class Registry {
     }
 
 }
-
 
 
 

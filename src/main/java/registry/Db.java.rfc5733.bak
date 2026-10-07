@@ -35,40 +35,6 @@ public final class Db {
             country VARCHAR(2) NOT NULL,
             created BIGINT NOT NULL
         );
-        CREATE TABLE contact_details(
-            contact_id VARCHAR(32) PRIMARY KEY REFERENCES contact(id) ON DELETE CASCADE,
-            roid VARCHAR(64) NOT NULL UNIQUE,
-            authinfo_hash VARCHAR(200) NOT NULL,
-            cr_id VARCHAR(16) NOT NULL,
-            up_id VARCHAR(16),
-            created BIGINT NOT NULL,
-            updated BIGINT,
-            int_name VARCHAR(200), int_org VARCHAR(200),
-            int_street1 VARCHAR(200), int_street2 VARCHAR(200), int_street3 VARCHAR(200),
-            int_city VARCHAR(200), int_sp VARCHAR(200), int_pc VARCHAR(30), int_cc VARCHAR(2),
-            loc_name VARCHAR(200), loc_org VARCHAR(200),
-            loc_street1 VARCHAR(200), loc_street2 VARCHAR(200), loc_street3 VARCHAR(200),
-            loc_city VARCHAR(200), loc_sp VARCHAR(200), loc_pc VARCHAR(30), loc_cc VARCHAR(2),
-            fax VARCHAR(50),
-            disclose_flag BOOLEAN,
-            disclose VARCHAR(500)
-        );
-
-        CREATE TABLE contact_status(
-            contact_id VARCHAR(32) NOT NULL REFERENCES contact(id) ON DELETE CASCADE,
-            status VARCHAR(40) NOT NULL,
-            PRIMARY KEY(contact_id,status)
-        );
-
-        CREATE TABLE contact_transfer(
-            contact_id VARCHAR(32) PRIMARY KEY REFERENCES contact(id) ON DELETE CASCADE,
-            requester VARCHAR(16) NOT NULL REFERENCES registrar(id),
-            sponsor VARCHAR(16) NOT NULL REFERENCES registrar(id),
-            requested BIGINT NOT NULL,
-            expires BIGINT NOT NULL,
-            status VARCHAR(20) NOT NULL
-        );
-
 
         CREATE TABLE domains(
             name VARCHAR(253) PRIMARY KEY,
