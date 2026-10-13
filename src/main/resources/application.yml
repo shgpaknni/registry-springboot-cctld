@@ -22,6 +22,20 @@ registry:
     rate-limit-burst: 20
     rate-limit-per-second: 10
   zone-file: ./data/zone.txt
+  dnssec:
+    enabled: false
+    signer-command: dnssec-signzone
+    verify-command: dnssec-verify
+    key-directory: ./data/dnssec-keys
+    # Replace these example values with the real authoritative nameservers for deployment.
+    apex-ns: "ns1.example.net.,ns2.example.net."
+    soa:
+      mname: ns1.example.net.
+      rname: hostmaster.example.net.
+      refresh: 3600
+      retry: 600
+      expire: 1209600
+      minimum: 300
   tls:
     keystore: certs/server.p12
     keystore-password: changeit

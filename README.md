@@ -41,6 +41,20 @@ java -jar target/cctld-registry-0.0.1-SNAPSHOT.jar   --registry.zone=in   --regi
 
 TLS keystore/truststore and passwords are also externalized under `registry.tls.*`.
 
+## DNSSEC zone signing (RFC 4033, RFC 4034, RFC 4035)
+
+`ZoneWriter` emits the SOA, apex NS, child NS delegations, and child DS records stored through the EPP DNSSEC mapping. When `registry.dnssec.enabled` is `true`, the publisher invokes BIND `dnssec-signzone` with explicit key pairs, checks for DNSKEY/RRSIG/NSEC-or-NSEC3 records, and runs `dnssec-verify`. Only a verified result replaces the published zone file. If signing or verification fails, the previous file remains in place and the outbox is not marked published.
+
+DNSSEC signing is **disabled by default** until the deployment has real key material and authoritative nameserver/SOA settings. Install BIND utilities so `dnssec-keygen`, `dnssec-signzone`, and `dnssec-verify` are available on `PATH`. Example commands for the prototype zone `xx`:
+
+```powershell
+New-Item -ItemType Directory -Force .\data\dnssec-keys | Out-Null
+dnssec-keygen -K .\data\dnssec-keys -a ECDSAP256SHA256 -f KSK -n ZONE xx
+dnssec-keygen -K .\data\dnssec-keys -a ECDSAP256SHA256 -n ZONE xx
+```
+
+Keep the generated private keys out of Git; `data/` is ignored. Configure `registry.dnssec.enabled: true`, the real apex nameservers, SOA values, and key directory before enabling signing. Replace `xx` in the key-generation commands with the configured zone name. For an actual TLD, successful local signing is only one part of deployment: the parent/root delegation must separately publish the DS for the TLD's DNSKEY.
+
 ## Health
 
 Spring Boot Actuator exposes:
