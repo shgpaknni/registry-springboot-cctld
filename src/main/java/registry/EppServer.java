@@ -103,13 +103,21 @@ public final class EppServer implements AutoCloseable {
     }
 
     static byte[] readFrame(DataInputStream in) throws IOException {
-        int len;
-        try {
-            len = in.readInt();
-        } catch (EOFException e) {
-            return null;
+        int b0 = in.read();
+        if (b0 < 0) return null; // Clean EOF between frames.
+
+        int b1 = in.read();
+        int b2 = in.read();
+        int b3 = in.read();
+        if (b1 < 0 || b2 < 0 || b3 < 0) {
+            throw new EOFException("truncated EPP frame header");
         }
-        if (len < 4 || len > MAX_FRAME + 4) throw new IOException("bad frame length");
+
+        int len = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        if (len < 5 || len > MAX_FRAME + 4) {
+            throw new IOException("bad frame length");
+        }
+
         byte[] b = new byte[len - 4];
         in.readFully(b);
         return b;
@@ -117,6 +125,9 @@ public final class EppServer implements AutoCloseable {
 
     static void writeFrame(DataOutputStream out, String xml) throws IOException {
         byte[] b = xml.getBytes(StandardCharsets.UTF_8);
+        if (b.length == 0 || b.length > MAX_FRAME) {
+            throw new IOException("bad frame payload length");
+        }
         out.writeInt(b.length + 4);
         out.write(b);
         out.flush();
