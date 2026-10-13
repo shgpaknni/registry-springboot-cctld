@@ -38,6 +38,11 @@ public final class Registry {
     /** Public RDAP registrar entity. Contact data is deliberately not included in this search subset. */
     public record RdapEntityView(String handle, String name) {}
 
+    /** A bounded RDAP search page plus the total number of matching registry objects. */
+    public record RdapSearchPage<T>(List<T> results, long totalCount) {
+        public RdapSearchPage { results = List.copyOf(results); }
+    }
+
     public record RestoreReport(
             String preData,
             String postData,
@@ -1806,81 +1811,117 @@ public final class Registry {
         });
     }
 
-    /**
-     * RFC 9082 domain-name search. Supports the name selector and at most one asterisk.
-     * Search results are bounded to protect the registry from expensive wide queries.
-     */
+    /** RFC 9082 domain-name search. RFC 8977 sort properties supported: name, registrationDate, expirationDate. */
     public List<DomainView> searchDomainsByName(String rawPattern) {
+        return searchDomainsByNamePage(rawPattern, "name", false).results();
+    }
+
+    public RdapSearchPage<DomainView> searchDomainsByNamePage(String rawPattern, String sortProperty, boolean descending) {
         String pattern = domainSearchPattern(rawPattern);
         String like = rdapSqlLikePattern(pattern);
+        String order = switch (sortProperty) {
+            case "name" -> "name";
+            case "registrationDate" -> "created";
+            case "expirationDate" -> "expires";
+            default -> throw new RegistryException(2005, "Unsupported domain sorting property: " + sortProperty);
+        };
+        String direction = descending ? " DESC" : " ASC";
+        String tieBreak = "name".equals(order) ? "" : ", name ASC";
         return read(c -> {
+            long total = num(rows(c, "SELECT COUNT(*) FROM domains WHERE name LIKE ? ESCAPE '!'", like).get(0)[0]);
             List<DomainView> out = new ArrayList<>();
-            for (Object[] x : rows(c, """
-                    SELECT name,sponsor,registrant,state,created,expires,state_since,server_hold
-                    FROM domains WHERE name LIKE ? ESCAPE '!'
-                    ORDER BY name LIMIT 100
-                    """, like)) {
+            String sql = "SELECT name,sponsor,registrant,state,created,expires,state_since,server_hold "
+                    + "FROM domains WHERE name LIKE ? ESCAPE '!' ORDER BY " + order + direction + tieBreak + " LIMIT 100";
+            for (Object[] x : rows(c, sql, like)) {
                 Row row = new Row((String) x[0], (String) x[1], (String) x[2], (String) x[3],
                         num(x[4]), num(x[5]), num(x[6]), (Boolean) x[7]);
                 out.add(view(c, row));
             }
-            return List.copyOf(out);
+            return new RdapSearchPage<>(out, total);
         });
     }
 
-    /** RFC 9082 nameserver-name search, with a hard maximum of 100 results. */
+    /** RFC 9082 nameserver-name search. RFC 8977 sort properties supported: name, registrationDate, lastChangedDate. */
     public List<RdapHostView> searchHostsByName(String rawPattern) {
+        return searchHostsByNamePage(rawPattern, "name", false).results();
+    }
+
+    public RdapSearchPage<RdapHostView> searchHostsByNamePage(String rawPattern, String sortProperty, boolean descending) {
         String pattern = hostSearchPattern(rawPattern);
         String like = rdapSqlLikePattern(pattern);
+        String order = switch (sortProperty) {
+            case "name" -> "name";
+            case "registrationDate" -> "created";
+            case "lastChangedDate" -> "updated";
+            default -> throw new RegistryException(2005, "Unsupported nameserver sorting property: " + sortProperty);
+        };
+        String direction = descending ? " DESC" : " ASC";
+        String tieBreak = "name".equals(order) ? "" : ", name ASC";
         return read(c -> {
+            long total = num(rows(c, "SELECT COUNT(*) FROM hosts WHERE name LIKE ? ESCAPE '!'", like).get(0)[0]);
             List<RdapHostView> out = new ArrayList<>();
-            for (Object[] x : rows(c, """
-                    SELECT name,registrar_id,created,updated
-                    FROM hosts WHERE name LIKE ? ESCAPE '!'
-                    ORDER BY name LIMIT 100
-                    """, like)) {
+            String sql = "SELECT name,registrar_id,created,updated FROM hosts WHERE name LIKE ? ESCAPE '!' "
+                    + "ORDER BY " + order + direction + tieBreak + " LIMIT 100";
+            for (Object[] x : rows(c, sql, like)) {
                 String name = (String) x[0];
                 String sponsor = (String) x[1];
                 List<String> ipv4 = hostAddresses(c, name, 4);
                 List<String> ipv6 = hostAddresses(c, name, 6);
                 boolean linked = !rows(c, "SELECT 1 FROM domain_ns WHERE ns=? LIMIT 1", name).isEmpty();
-                out.add(new RdapHostView(name, sponsor, ipv4, ipv6,
-                        num(x[2]), num(x[3]), linked));
+                out.add(new RdapHostView(name, sponsor, ipv4, ipv6, num(x[2]), num(x[3]), linked));
             }
-            return List.copyOf(out);
+            return new RdapSearchPage<>(out, total);
         });
     }
 
     /** RFC 9082 registrar-entity search by handle. Contact entities are outside this supported subset. */
     public List<RdapEntityView> searchRegistrarsByHandle(String rawPattern) {
+        return searchRegistrarsByHandlePage(rawPattern, "handle", false).results();
+    }
+
+    public RdapSearchPage<RdapEntityView> searchRegistrarsByHandlePage(String rawPattern, String sortProperty, boolean descending) {
         String pattern = entityHandleSearchPattern(rawPattern);
         String like = rdapSqlLikePattern(pattern);
+        String order = entitySortColumn(sortProperty);
+        String direction = descending ? " DESC" : " ASC";
+        String tieBreak = "id".equals(order) ? "" : ", id ASC";
         return read(c -> {
+            long total = num(rows(c, "SELECT COUNT(*) FROM registrar WHERE id LIKE ? ESCAPE '!'", like).get(0)[0]);
             List<RdapEntityView> out = new ArrayList<>();
-            for (Object[] x : rows(c, """
-                    SELECT id,name FROM registrar WHERE id LIKE ? ESCAPE '!'
-                    ORDER BY id LIMIT 100
-                    """, like)) {
-                out.add(new RdapEntityView((String) x[0], (String) x[1]));
-            }
-            return List.copyOf(out);
+            String sql = "SELECT id,name FROM registrar WHERE id LIKE ? ESCAPE '!' ORDER BY "
+                    + order + direction + tieBreak + " LIMIT 100";
+            for (Object[] x : rows(c, sql, like)) out.add(new RdapEntityView((String) x[0], (String) x[1]));
+            return new RdapSearchPage<>(out, total);
         });
     }
 
     /** RFC 9082 registrar-entity search by fn; contact entities are not searched by this prototype. */
     public List<RdapEntityView> searchRegistrarsByName(String rawPattern) {
+        return searchRegistrarsByNamePage(rawPattern, "handle", false).results();
+    }
+
+    public RdapSearchPage<RdapEntityView> searchRegistrarsByNamePage(String rawPattern, String sortProperty, boolean descending) {
         String pattern = entityNameSearchPattern(rawPattern);
         String like = rdapSqlLikePattern(pattern);
+        String order = entitySortColumn(sortProperty);
+        String direction = descending ? " DESC" : " ASC";
+        String tieBreak = "id".equals(order) ? "" : ", id ASC";
         return read(c -> {
+            long total = num(rows(c, "SELECT COUNT(*) FROM registrar WHERE LOWER(name) LIKE ? ESCAPE '!'", like).get(0)[0]);
             List<RdapEntityView> out = new ArrayList<>();
-            for (Object[] x : rows(c, """
-                    SELECT id,name FROM registrar WHERE LOWER(name) LIKE ? ESCAPE '!'
-                    ORDER BY id LIMIT 100
-                    """, like)) {
-                out.add(new RdapEntityView((String) x[0], (String) x[1]));
-            }
-            return List.copyOf(out);
+            String sql = "SELECT id,name FROM registrar WHERE LOWER(name) LIKE ? ESCAPE '!' ORDER BY "
+                    + order + direction + tieBreak + " LIMIT 100";
+            for (Object[] x : rows(c, sql, like)) out.add(new RdapEntityView((String) x[0], (String) x[1]));
+            return new RdapSearchPage<>(out, total);
         });
+    }
+
+    private static String entitySortColumn(String property) {
+        return switch (property) {
+            case "handle" -> "id";
+            case "fn" -> "LOWER(name)";
+            default -> throw new RegistryException(2005, "Unsupported registrar entity sorting property: " + property);
+        };
     }
 
     private String domainSearchPattern(String raw) {

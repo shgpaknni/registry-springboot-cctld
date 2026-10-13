@@ -7,6 +7,11 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -51,7 +56,7 @@ public final class RdapServer implements AutoCloseable {
             }
             String path = ex.getRequestURI().getPath();
             if (path.equals("/rdap/help")) {
-                send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"],\"notices\":[{\"title\":\"Help\",\"description\":[\"Supported lookups: /rdap/domain/{name}, /rdap/nameserver/{name}, and /rdap/entity/{registrar-handle}. Unsupported query types return 501.\"]}]}");
+                send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"],\"notices\":[{\"title\":\"Help\",\"description\":[\"Lookups: /rdap/domain/{name}, /rdap/nameserver/{name}, /rdap/entity/{registrar-handle}. Searches: /rdap/domains?name={pattern}, /rdap/nameservers?name={pattern}, /rdap/entities?handle={pattern} or fn={pattern}. Search queries support count, sort, and cursor on a bounded subset. Unsupported query types return 501.\"]}]}");
             } else if (path.startsWith("/rdap/domain/")) {
                 domain(ex, path.substring("/rdap/domain/".length()));
             } else if (path.startsWith("/rdap/nameserver/")) {
@@ -92,111 +97,196 @@ public final class RdapServer implements AutoCloseable {
         send(ex, 200, render(v.get()));
     }
 
-    private record SearchParameter(String name, String value) {}
+    private static final int SEARCH_PAGE_SIZE = 25;
+    private static final int SEARCH_RESULT_CAP = 100;
+    private record SearchRequest(String selector, String value, boolean count, String sort,
+                                 String sortProperty, boolean descending, int offset) {}
 
-    /** RFC 9082 defines one selector per search query. */
-    private SearchParameter searchParameter(HttpExchange ex) {
+    /** Parse RFC 9082 selectors plus RFC 8977 count/sort/cursor parameters. */
+    private SearchRequest searchRequest(HttpExchange ex, String defaultSort) {
         String raw = ex.getRequestURI().getRawQuery();
-        if (raw == null || raw.isBlank() || raw.indexOf('&') >= 0)
-            throw new RegistryException(2005, "Exactly one RDAP search parameter is required");
-        int equals = raw.indexOf('=');
-        if (equals <= 0 || equals == raw.length() - 1 || raw.indexOf('=', equals + 1) >= 0)
-            throw new RegistryException(2005, "Malformed RDAP search parameter");
+        if (raw == null || raw.isBlank()) throw new RegistryException(2005, "An RDAP search selector is required");
+        Map<String, String> params = new LinkedHashMap<>();
         try {
-            String name = URLDecoder.decode(raw.substring(0, equals), StandardCharsets.UTF_8);
-            String value = URLDecoder.decode(raw.substring(equals + 1), StandardCharsets.UTF_8);
-            if (name.isBlank() || value.isBlank())
-                throw new RegistryException(2005, "RDAP search parameter and value are required");
-            return new SearchParameter(name, value);
+            for (String component : raw.split("&", -1)) {
+                int equals = component.indexOf('=');
+                if (equals <= 0) throw new RegistryException(2005, "Malformed RDAP search parameter");
+                String name = URLDecoder.decode(component.substring(0, equals), StandardCharsets.UTF_8);
+                String value = URLDecoder.decode(component.substring(equals + 1), StandardCharsets.UTF_8);
+                if (name.isBlank() || value.isBlank() || params.putIfAbsent(name, value) != null)
+                    throw new RegistryException(2005, "Empty or duplicate RDAP search parameter");
+            }
         } catch (IllegalArgumentException e) {
             throw new RegistryException(2005, "Invalid percent-encoding in RDAP search query");
         }
+        boolean count = false;
+        if (params.containsKey("count")) {
+            count = switch (params.remove("count").toLowerCase(java.util.Locale.ROOT)) {
+                case "true", "yes", "1" -> true;
+                case "false", "no", "0" -> false;
+                default -> throw new RegistryException(2005, "Invalid RDAP count value");
+            };
+        }
+        String sort = params.remove("sort");
+        if (sort == null) sort = defaultSort;
+        Matcher sortMatch = Pattern.compile("^([A-Za-z][A-Za-z0-9_]*)(?::([ad]))?$").matcher(sort);
+        if (!sortMatch.matches()) throw new RegistryException(2005, "Malformed or unsupported RDAP sort parameter");
+        String sortProperty = sortMatch.group(1);
+        boolean descending = "d".equals(sortMatch.group(2));
+        String cursor = params.remove("cursor");
+        if (params.size() != 1) throw new RegistryException(2005, "Exactly one RDAP search selector is required");
+        Map.Entry<String, String> selector = params.entrySet().iterator().next();
+        int offset = 0;
+        if (cursor != null) {
+            try {
+                String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
+                Matcher cursorMatch = Pattern.compile("^offset=(\\d+),limit=(\\d+)$").matcher(decoded);
+                if (!cursorMatch.matches()) throw new IllegalArgumentException();
+                offset = Integer.parseInt(cursorMatch.group(1));
+                int limit = Integer.parseInt(cursorMatch.group(2));
+                if (limit != SEARCH_PAGE_SIZE || offset < 0 || offset > SEARCH_RESULT_CAP - SEARCH_PAGE_SIZE
+                        || offset % SEARCH_PAGE_SIZE != 0) throw new IllegalArgumentException();
+            } catch (IllegalArgumentException e) {
+                throw new RegistryException(2005, "Invalid RDAP cursor");
+            }
+        }
+        return new SearchRequest(selector.getKey(), selector.getValue(), count, sort, sortProperty, descending, offset);
     }
 
     private void domainSearch(HttpExchange ex) throws IOException {
-        final SearchParameter p;
-        try {
-            p = searchParameter(ex);
-        } catch (RegistryException e) {
-            send(ex, 400, error(400, "Bad Request", e.getMessage()));
-            return;
-        }
-        if (!"name".equals(p.name())) {
-            send(ex, 501, error(501, "Not Implemented", "Supported domain search selector: name."));
-            return;
+        final SearchRequest p;
+        try { p = searchRequest(ex, "name"); }
+        catch (RegistryException e) { send(ex, 400, error(400, "Bad Request", e.getMessage())); return; }
+        if (!"name".equals(p.selector())) {
+            send(ex, 501, error(501, "Not Implemented", "Supported domain search selector: name.")); return;
         }
         try {
-            List<Registry.DomainView> found = reg.searchDomainsByName(p.value());
-            StringBuilder body = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"domainSearchResults\":[");
-            for (int i = 0; i < found.size(); i++) {
-                if (i > 0) body.append(',');
-                body.append(withoutConformance(render(found.get(i))));
-            }
-            send(ex, 200, body.append("]}").toString());
-        } catch (RegistryException e) {
-            sendSearchFailure(ex, e);
-        }
+            Registry.RdapSearchPage<Registry.DomainView> result = reg.searchDomainsByNamePage(p.value(), p.sortProperty(), p.descending());
+            List<Registry.DomainView> page = slice(result.results(), p.offset());
+            List<String> objects = new ArrayList<>();
+            for (Registry.DomainView d : page) objects.add(withoutConformance(render(d)));
+            sendSearchResponse(ex, p, "domainSearchResults", objects, result.totalCount(), "domains");
+        } catch (RegistryException e) { sendSearchFailure(ex, e); }
     }
 
     private void nameserverSearch(HttpExchange ex) throws IOException {
-        final SearchParameter p;
-        try {
-            p = searchParameter(ex);
-        } catch (RegistryException e) {
-            send(ex, 400, error(400, "Bad Request", e.getMessage()));
-            return;
-        }
-        if (!"name".equals(p.name())) {
-            send(ex, 501, error(501, "Not Implemented", "Supported nameserver search selector: name."));
-            return;
+        final SearchRequest p;
+        try { p = searchRequest(ex, "name"); }
+        catch (RegistryException e) { send(ex, 400, error(400, "Bad Request", e.getMessage())); return; }
+        if (!"name".equals(p.selector())) {
+            send(ex, 501, error(501, "Not Implemented", "Supported nameserver search selector: name.")); return;
         }
         try {
-            List<Registry.RdapHostView> found = reg.searchHostsByName(p.value());
-            StringBuilder body = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"nameserverSearchResults\":[");
-            for (int i = 0; i < found.size(); i++) {
-                if (i > 0) body.append(',');
-                body.append(withoutConformance(renderNameserver(found.get(i))));
-            }
-            send(ex, 200, body.append("]}").toString());
-        } catch (RegistryException e) {
-            sendSearchFailure(ex, e);
-        }
+            Registry.RdapSearchPage<Registry.RdapHostView> result = reg.searchHostsByNamePage(p.value(), p.sortProperty(), p.descending());
+            List<Registry.RdapHostView> page = slice(result.results(), p.offset());
+            List<String> objects = new ArrayList<>();
+            for (Registry.RdapHostView h : page) objects.add(withoutConformance(renderNameserver(h)));
+            sendSearchResponse(ex, p, "nameserverSearchResults", objects, result.totalCount(), "nameservers");
+        } catch (RegistryException e) { sendSearchFailure(ex, e); }
     }
 
     private void entitySearch(HttpExchange ex) throws IOException {
-        final SearchParameter p;
-        try {
-            p = searchParameter(ex);
-        } catch (RegistryException e) {
-            send(ex, 400, error(400, "Bad Request", e.getMessage()));
-            return;
-        }
-        if (!"handle".equals(p.name()) && !"fn".equals(p.name())) {
-            send(ex, 501, error(501, "Not Implemented", "Supported registrar entity search selectors: handle and fn."));
-            return;
+        final SearchRequest p;
+        try { p = searchRequest(ex, "handle"); }
+        catch (RegistryException e) { send(ex, 400, error(400, "Bad Request", e.getMessage())); return; }
+        if (!"handle".equals(p.selector()) && !"fn".equals(p.selector())) {
+            send(ex, 501, error(501, "Not Implemented", "Supported registrar entity search selectors: handle and fn.")); return;
         }
         try {
-            List<Registry.RdapEntityView> found = "handle".equals(p.name())
-                    ? reg.searchRegistrarsByHandle(p.value())
-                    : reg.searchRegistrarsByName(p.value());
-            StringBuilder body = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"entitySearchResults\":[");
-            for (int i = 0; i < found.size(); i++) {
-                if (i > 0) body.append(',');
-                Registry.RdapEntityView entity = found.get(i);
-                body.append(registrarEntity(entity.handle(), entity.name()));
+            Registry.RdapSearchPage<Registry.RdapEntityView> result = "handle".equals(p.selector())
+                    ? reg.searchRegistrarsByHandlePage(p.value(), p.sortProperty(), p.descending())
+                    : reg.searchRegistrarsByNamePage(p.value(), p.sortProperty(), p.descending());
+            List<Registry.RdapEntityView> page = slice(result.results(), p.offset());
+            List<String> objects = new ArrayList<>();
+            for (Registry.RdapEntityView entity : page) objects.add(registrarEntity(entity.handle(), entity.name()));
+            sendSearchResponse(ex, p, "entitySearchResults", objects, result.totalCount(), "entities");
+        } catch (RegistryException e) { sendSearchFailure(ex, e); }
+    }
+
+    private static <T> List<T> slice(List<T> results, int offset) {
+        if (offset >= results.size()) return List.of();
+        return results.subList(offset, Math.min(offset + SEARCH_PAGE_SIZE, results.size()));
+    }
+
+    private void sendSearchResponse(HttpExchange ex, SearchRequest p, String resultsKey, List<String> objects,
+                                    long total, String objectType) throws IOException {
+        boolean paging = p.count() || total > SEARCH_PAGE_SIZE;
+        String conformance = paging
+                ? "[\"rdap_level_0\",\"sorting\",\"paging\"]"
+                : "[\"rdap_level_0\",\"sorting\"]";
+        StringBuilder body = new StringBuilder("{\"rdapConformance\":").append(conformance)
+                .append(",\"sorting_metadata\":").append(sortingMetadata(p.sort(), objectType));
+        if (paging) {
+            body.append(",\"paging_metadata\":{");
+            boolean comma = false;
+            if (p.count()) { body.append("\"totalCount\":").append(total); comma = true; }
+            if (total > SEARCH_PAGE_SIZE) {
+                if (comma) body.append(',');
+                body.append("\"pageSize\":").append(SEARCH_PAGE_SIZE)
+                        .append(",\"pageNumber\":").append((p.offset() / SEARCH_PAGE_SIZE) + 1);
+                int nextOffset = p.offset() + objects.size();
+                if (nextOffset < Math.min(total, SEARCH_RESULT_CAP)) {
+                    body.append(",\"links\":[{\"value\":").append(q(ex.getRequestURI().toString()))
+                            .append(",\"rel\":\"next\",\"href\":")
+                            .append(q(nextPageUri(ex, nextOffset))).append(",\"title\":\"Result Pagination Link\",\"type\":\"application/rdap+json\"}]");
+                }
             }
-            send(ex, 200, body.append("]}").toString());
-        } catch (RegistryException e) {
-            sendSearchFailure(ex, e);
+            body.append('}');
         }
+        if (total > SEARCH_RESULT_CAP) {
+            body.append(",\"notices\":[{\"title\":\"Search query limits\",\"description\":[\"Search results are limited to the first 100 objects for this query.\"]}]");
+        }
+        body.append(",\"").append(resultsKey).append("\":[");
+        for (int i = 0; i < objects.size(); i++) { if (i > 0) body.append(','); body.append(objects.get(i)); }
+        send(ex, 200, body.append("]}").toString());
+    }
+
+    private static String sortingMetadata(String currentSort, String objectType) {
+        String[][] entries = switch (objectType) {
+            case "domains" -> new String[][] {
+                    {"name", "$.domainSearchResults[*].[unicodeName,ldhName]", "true"},
+                    {"registrationDate", "$.domainSearchResults[*].events[?(@.eventAction==\"registration\")].eventDate", "false"},
+                    {"expirationDate", "$.domainSearchResults[*].events[?(@.eventAction==\"expiration\")].eventDate", "false"}
+            };
+            case "nameservers" -> new String[][] {
+                    {"name", "$.nameserverSearchResults[*].[unicodeName,ldhName]", "true"},
+                    {"registrationDate", "$.nameserverSearchResults[*].events[?(@.eventAction==\"registration\")].eventDate", "false"},
+                    {"lastChangedDate", "$.nameserverSearchResults[*].events[?(@.eventAction==\"last changed\")].eventDate", "false"}
+            };
+            default -> new String[][] {
+                    {"handle", "$.entitySearchResults[*].handle", "true"},
+                    {"fn", "$.entitySearchResults[*].vcardArray[1][?(@[0]==\"fn\")][3]", "false"}
+            };
+        };
+        StringBuilder json = new StringBuilder("{\"currentSort\":").append(q(currentSort)).append(",\"availableSorts\":[");
+        for (int i = 0; i < entries.length; i++) {
+            if (i > 0) json.append(',');
+            json.append("{\"property\":").append(q(entries[i][0]))
+                    .append(",\"jsonPath\":").append(q(entries[i][1]))
+                    .append(",\"default\":").append(entries[i][2]).append('}');
+        }
+        return json.append("]}").toString();
+    }
+
+    private static String nextPageUri(HttpExchange ex, int nextOffset) {
+        String rawQuery = ex.getRequestURI().getRawQuery();
+        List<String> parts = new ArrayList<>();
+        if (rawQuery != null) {
+            for (String part : rawQuery.split("&")) {
+                int equals = part.indexOf('=');
+                String name = equals < 0 ? part : part.substring(0, equals);
+                if (!"cursor".equals(name)) parts.add(part);
+            }
+        }
+        String cursor = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                ("offset=" + nextOffset + ",limit=" + SEARCH_PAGE_SIZE).getBytes(StandardCharsets.UTF_8));
+        parts.add("cursor=" + cursor);
+        return ex.getRequestURI().getRawPath() + "?" + String.join("&", parts);
     }
 
     private void sendSearchFailure(HttpExchange ex, RegistryException e) throws IOException {
-        if (e.code == 2005 || e.code == 2306) {
-            send(ex, 400, error(400, "Bad Request", e.getMessage()));
-        } else {
-            send(ex, 500, error(500, "Internal Error", "Unable to process RDAP search."));
-        }
+        if (e.code == 2005 || e.code == 2306) send(ex, 400, error(400, "Bad Request", e.getMessage()));
+        else send(ex, 500, error(500, "Internal Error", "Unable to process RDAP search."));
     }
 
     private static String withoutConformance(String json) {
