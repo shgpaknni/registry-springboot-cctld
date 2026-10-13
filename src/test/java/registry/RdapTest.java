@@ -137,6 +137,45 @@ class RdapTest {
         assertEquals(400, get("/rdap/domains?name=alpha.xx&name=beta.xx").statusCode());
     }
 
+
+    @Test
+    void rdapSearchCountAndCursorPagingWork() throws Exception {
+        for (int i = 0; i < 27; i++) {
+            String name = String.format(java.util.Locale.ROOT, "page%02d.xx", i);
+            reg.createDomain("reg1", name, 1, "con1", List.of("ns1.example.net", "ns2.example.net"), "auth-secret-" + i);
+
+        }
+        var first = get("/rdap/domains?name=page*.xx&count=true");
+        assertEquals(200, first.statusCode(), first.body());
+        assertTrue(first.body().contains("\"totalCount\":27"), first.body());
+        assertTrue(first.body().contains("\"pageSize\":25"), first.body());
+        assertTrue(first.body().contains("\"pageNumber\":1"), first.body());
+        assertTrue(first.body().contains("\"paging\""), first.body());
+        int href = first.body().indexOf("\"href\":\"");
+        assertTrue(href >= 0, first.body());
+        int start = href + "\"href\":\"".length();
+        int end = first.body().indexOf('"', start);
+        String next = first.body().substring(start, end);
+        var second = get(next);
+        assertEquals(200, second.statusCode(), second.body());
+        assertTrue(second.body().contains("\"pageNumber\":2"), second.body());
+        assertTrue(second.body().contains("page25.xx"), second.body());
+        assertTrue(second.body().contains("page26.xx"), second.body());
+    }
+
+    @Test
+    void rdapSearchSupportsSortingAndRejectsInvalidPagingParameters() throws Exception {
+        reg.createDomain("reg1", "beta.xx", 1, "con1", List.of("ns1.example.net", "ns2.example.net"), "auth-secret-beta");
+
+        var descending = get("/rdap/domains?name=*.xx&sort=name:d");
+        assertEquals(200, descending.statusCode(), descending.body());
+        assertTrue(descending.body().contains("\"currentSort\":\"name:d\""), descending.body());
+        assertTrue(descending.body().indexOf("beta.xx") < descending.body().indexOf("alpha.xx"), descending.body());
+        assertEquals(400, get("/rdap/domains?name=alpha.xx&count=maybe").statusCode());
+        assertEquals(400, get("/rdap/domains?name=alpha.xx&sort=unknown").statusCode());
+        assertEquals(400, get("/rdap/domains?name=alpha.xx&cursor=not-a-valid-cursor").statusCode());
+    }
+
     @Test
     void rateLimitReturns429ThenRecovers() throws Exception {
         for (int i = 0; i < 5; i++) assertEquals(200, get("/rdap/domain/alpha.xx").statusCode());

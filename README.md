@@ -63,7 +63,7 @@ Spring Boot Actuator exposes:
 GET http://localhost:8081/actuator/health
 ```
 
-The RDAP service supports exact domain, nameserver, and registrar-entity lookups plus a bounded subset of RFC 9082 search queries. Registrant details are redacted. Search queries accept one selector and at most one `*` wildcard; search results are capped at 100 objects.
+The RDAP service supports exact domain, nameserver, and registrar-entity lookups plus a bounded subset of RFC 9082 search and RFC 8977 sorting/paging. Registrant details are redacted. Search queries accept one selector and at most one `*` wildcard; a maximum of 100 matching objects is considered and pages contain at most 25 objects.
 
 ```text
 GET  /rdap/help
@@ -73,13 +73,13 @@ GET  /rdap/nameserver/{name}
 HEAD /rdap/nameserver/{name}
 GET  /rdap/entity/{registrar-handle}
 HEAD /rdap/entity/{registrar-handle}
-GET  /rdap/domains?name={pattern}
-GET  /rdap/nameservers?name={pattern}
-GET  /rdap/entities?handle={pattern}
-GET  /rdap/entities?fn={pattern}
+GET  /rdap/domains?name={pattern}&count=true&sort=name&cursor={cursor}
+GET  /rdap/nameservers?name={pattern}&count=true&sort=name&cursor={cursor}
+GET  /rdap/entities?handle={pattern}&count=true&sort=handle&cursor={cursor}
+GET  /rdap/entities?fn={pattern}&count=true&sort=fn&cursor={cursor}
 ```
 
-Domain search supports `name`; nameserver search supports `name`; registrar entity search supports `handle` and `fn`. Other selectors (including nameserver-IP and domain-by-nameserver searches) and unsupported query classes return HTTP 501. Malformed search patterns return HTTP 400. Search results expose only registrar entity data; contact entity search is not implemented.
+`count` accepts `true`, `yes`, `1`, `false`, `no`, or `0`. This bounded implementation provides cursor paging, total-count metadata, sorting metadata, and sort properties for domain name/date fields, nameserver name/date fields, and registrar entity handle/display name. It does not implement every RFC 8977 sorting property; in particular, nameserver IP-address sorting remains unsupported. Other RDAP search selectors (including nameserver-IP and domain-by-nameserver searches) and unsupported query classes return HTTP 501. Malformed search patterns or paging/sort parameters return HTTP 400. Search results expose only registrar entity data; contact entity search is not implemented.
 
 EPP remains a separate TLS protocol listener because EPP is not HTTP.
 
