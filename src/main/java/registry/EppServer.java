@@ -260,6 +260,15 @@ public final class EppServer implements AutoCloseable {
                 case "transfer": return domainTransfer(st, obj, ext, cl);
                 default: break;
             }
+        } else if (NS_HOST.equals(obj.getNamespaceURI())) {
+            switch (name) {
+                case "check": return hostCheck(st, obj, cl);
+                case "create": return hostCreate(st, obj, cl);
+                case "info": return hostInfo(st, obj, cl);
+                case "update": return hostUpdate(st, obj, cl);
+                case "delete": return hostDelete(st, obj, cl);
+                default: break;
+            }
         } else if (NS_CONTACT.equals(obj.getNamespaceURI())) {
             switch (name) {
                 case "check":
@@ -1057,6 +1066,32 @@ public final class EppServer implements AutoCloseable {
                 other
         );
     }
+
+    private String hostCheck(Session st, Element obj, String cl) {
+        List<String> names = new ArrayList<>();
+        for (Element e : kids(obj)) {
+            if ("name".equals(e.getLocalName())) names.add(e.getTextContent().trim());
+        }
+
+        StringBuilder body = new StringBuilder(
+                "<resData><host:chkData xmlns:host=\"" + NS_HOST + "\">");
+        for (Registry.HostAvailability result : reg.checkHosts(st.registrar, names)) {
+            body.append("<host:cd><host:name avail=\"")
+                    .append(result.available() ? "1" : "0")
+                    .append("\">")
+                    .append(esc(result.name()))
+                    .append("</host:name>");
+            if (!result.available() && result.reason() != null) {
+                body.append("<host:reason>")
+                        .append(esc(result.reason()))
+                        .append("</host:reason>");
+            }
+            body.append("</host:cd>");
+        }
+        body.append("</host:chkData></resData>");
+        return response(1000, "Command completed successfully", body.toString(), cl);
+    }
+
 
     private String hostCreate(
             Session st,

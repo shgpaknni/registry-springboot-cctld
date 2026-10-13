@@ -192,6 +192,55 @@ class EppTest {
                 new DataOutputStream(new ByteArrayOutputStream()), oversized));
     }
     @Test
+    void rfc5732HostCommandsWorkOverEpp() throws Exception {
+        String ns = "urn:ietf:params:xml:ns:host-1.0";
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            assertTrue(c.read().contains("<greeting>"));
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+
+            String checkBefore = c.cmd("<check><host:check xmlns:host=\"" + ns + "\">"
+                    + "<host:name>ns3.example.net</host:name></host:check></check>");
+            assertEquals(1000, code(checkBefore), checkBefore);
+            assertTrue(checkBefore.contains("avail=\"1\">ns3.example.net</host:name>"), checkBefore);
+
+            String create = c.cmd("<create><host:create xmlns:host=\"" + ns + "\">"
+                    + "<host:name>ns3.example.net</host:name>"
+                    + "<host:addr ip=\"v4\">192.0.2.53</host:addr>"
+                    + "<host:addr ip=\"v6\">2001:db8::53</host:addr>"
+                    + "</host:create></create>");
+            assertEquals(1000, code(create), create);
+
+            String checkAfter = c.cmd("<check><host:check xmlns:host=\"" + ns + "\">"
+                    + "<host:name>ns3.example.net</host:name></host:check></check>");
+            assertEquals(1000, code(checkAfter), checkAfter);
+            assertTrue(checkAfter.contains("avail=\"0\">ns3.example.net</host:name>"), checkAfter);
+
+            String info = c.cmd("<info><host:info xmlns:host=\"" + ns + "\"><host:name>ns3.example.net</host:name>"
+                    + "</host:info></info>");
+            assertEquals(1000, code(info), info);
+            assertTrue(info.contains("192.0.2.53"), info);
+            assertTrue(info.contains("2001:db8::53"), info);
+
+            String update = c.cmd("<update><host:update xmlns:host=\"" + ns + "\"><host:name>ns3.example.net</host:name>"
+                    + "<host:add><host:addr ip=\"v4\">198.51.100.10</host:addr></host:add>"
+                    + "<host:rem><host:addr ip=\"v4\">192.0.2.53</host:addr></host:rem>"
+                    + "</host:update></update>");
+            assertEquals(1000, code(update), update);
+            info = c.cmd("<info><host:info xmlns:host=\"" + ns + "\"><host:name>ns3.example.net</host:name>"
+                    + "</host:info></info>");
+            assertEquals(1000, code(info), info);
+            assertFalse(info.contains("192.0.2.53"), info);
+            assertTrue(info.contains("198.51.100.10"), info);
+
+            String delete = c.cmd("<delete><host:delete xmlns:host=\"" + ns + "\"><host:name>ns3.example.net</host:name>"
+                    + "</host:delete></delete>");
+            assertEquals(1000, code(delete), delete);
+            assertEquals(2303, code(c.cmd("<info><host:info xmlns:host=\"" + ns + "\">"
+                    + "<host:name>ns3.example.net</host:name></host:info></info>")));
+        }
+    }
+
+    @Test
     void fullRegistrarSession() throws Exception {
         try (Client c = new Client(clientCtx("reg1"), server.port())) {
             assertTrue(c.read().contains("<greeting>"));
