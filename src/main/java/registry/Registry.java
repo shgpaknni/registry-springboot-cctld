@@ -35,6 +35,9 @@ public final class Registry {
         }
     }
 
+    /** Public RDAP registrar entity. Contact data is deliberately not included in this search subset. */
+    public record RdapEntityView(String handle, String name) {}
+
     public record RestoreReport(
             String preData,
             String postData,
@@ -1801,6 +1804,139 @@ public final class Registry {
             return Optional.of(new RdapHostView(name, sponsor, ipv4, ipv6,
                     num(x[1]), num(x[2]), linked));
         });
+    }
+
+    /**
+     * RFC 9082 domain-name search. Supports the name selector and at most one asterisk.
+     * Search results are bounded to protect the registry from expensive wide queries.
+     */
+    public List<DomainView> searchDomainsByName(String rawPattern) {
+        String pattern = domainSearchPattern(rawPattern);
+        String like = rdapSqlLikePattern(pattern);
+        return read(c -> {
+            List<DomainView> out = new ArrayList<>();
+            for (Object[] x : rows(c, """
+                    SELECT name,sponsor,registrant,state,created,expires,state_since,server_hold
+                    FROM domains WHERE name LIKE ? ESCAPE '!'
+                    ORDER BY name LIMIT 100
+                    """, like)) {
+                Row row = new Row((String) x[0], (String) x[1], (String) x[2], (String) x[3],
+                        num(x[4]), num(x[5]), num(x[6]), (Boolean) x[7]);
+                out.add(view(c, row));
+            }
+            return List.copyOf(out);
+        });
+    }
+
+    /** RFC 9082 nameserver-name search, with a hard maximum of 100 results. */
+    public List<RdapHostView> searchHostsByName(String rawPattern) {
+        String pattern = hostSearchPattern(rawPattern);
+        String like = rdapSqlLikePattern(pattern);
+        return read(c -> {
+            List<RdapHostView> out = new ArrayList<>();
+            for (Object[] x : rows(c, """
+                    SELECT name,registrar_id,created,updated
+                    FROM hosts WHERE name LIKE ? ESCAPE '!'
+                    ORDER BY name LIMIT 100
+                    """, like)) {
+                String name = (String) x[0];
+                String sponsor = (String) x[1];
+                List<String> ipv4 = hostAddresses(c, name, 4);
+                List<String> ipv6 = hostAddresses(c, name, 6);
+                boolean linked = !rows(c, "SELECT 1 FROM domain_ns WHERE ns=? LIMIT 1", name).isEmpty();
+                out.add(new RdapHostView(name, sponsor, ipv4, ipv6,
+                        num(x[2]), num(x[3]), linked));
+            }
+            return List.copyOf(out);
+        });
+    }
+
+    /** RFC 9082 registrar-entity search by handle. Contact entities are outside this supported subset. */
+    public List<RdapEntityView> searchRegistrarsByHandle(String rawPattern) {
+        String pattern = entityHandleSearchPattern(rawPattern);
+        String like = rdapSqlLikePattern(pattern);
+        return read(c -> {
+            List<RdapEntityView> out = new ArrayList<>();
+            for (Object[] x : rows(c, """
+                    SELECT id,name FROM registrar WHERE id LIKE ? ESCAPE '!'
+                    ORDER BY id LIMIT 100
+                    """, like)) {
+                out.add(new RdapEntityView((String) x[0], (String) x[1]));
+            }
+            return List.copyOf(out);
+        });
+    }
+
+    /** RFC 9082 registrar-entity search by fn; contact entities are not searched by this prototype. */
+    public List<RdapEntityView> searchRegistrarsByName(String rawPattern) {
+        String pattern = entityNameSearchPattern(rawPattern);
+        String like = rdapSqlLikePattern(pattern);
+        return read(c -> {
+            List<RdapEntityView> out = new ArrayList<>();
+            for (Object[] x : rows(c, """
+                    SELECT id,name FROM registrar WHERE LOWER(name) LIKE ? ESCAPE '!'
+                    ORDER BY id LIMIT 100
+                    """, like)) {
+                out.add(new RdapEntityView((String) x[0], (String) x[1]));
+            }
+            return List.copyOf(out);
+        });
+    }
+
+    private String domainSearchPattern(String raw) {
+        String pattern = Names.normalize(raw);
+        if (pattern.indexOf('*') != pattern.lastIndexOf('*'))
+            throw new RegistryException(2005, "RDAP search patterns allow at most one asterisk");
+        String candidate = pattern.replace("*", "x");
+        if (!candidate.endsWith("." + cfg.zone()))
+            throw new RegistryException(2306, "Domain search pattern is outside this registry zone");
+        Names.parse(candidate, cfg);
+        return pattern;
+    }
+
+    private static String hostSearchPattern(String raw) {
+        String pattern = Names.normalize(raw);
+        if (pattern.indexOf('*') != pattern.lastIndexOf('*'))
+            throw new RegistryException(2005, "RDAP search patterns allow at most one asterisk");
+        Names.host(pattern.replace("*", "x"));
+        return pattern;
+    }
+
+    private static String entityHandleSearchPattern(String raw) {
+        if (raw == null || raw.isBlank())
+            throw new RegistryException(2005, "Registrar handle search pattern is required");
+        // Preserve case for handles; lookup semantics are provider-defined.
+        String pattern = raw.trim();
+        if (pattern.length() > 32 || pattern.chars().anyMatch(Character::isISOControl)
+                || pattern.indexOf('*') != pattern.lastIndexOf('*'))
+            throw new RegistryException(2005, "Malformed registrar handle search pattern");
+        String candidate = pattern.replace("*", "x");
+        if (!ID.matcher(candidate).matches())
+            throw new RegistryException(2005, "Malformed registrar handle search pattern");
+        return pattern;
+    }
+
+    private static String entityNameSearchPattern(String raw) {
+        return normalizeEntitySearchPattern(raw);
+    }
+
+    private static String normalizeEntitySearchPattern(String raw) {
+        if (raw == null || raw.isBlank())
+            throw new RegistryException(2005, "RDAP search pattern is required");
+        String pattern = java.text.Normalizer.normalize(raw.trim(), java.text.Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT);
+        if (pattern.length() > 128 || pattern.chars().anyMatch(Character::isISOControl)
+                || pattern.indexOf('*') != pattern.lastIndexOf('*'))
+            throw new RegistryException(2005, "Malformed RDAP entity search pattern");
+        return pattern;
+    }
+
+    /** Escapes SQL LIKE metacharacters; only the RFC-defined asterisk is a search wildcard. */
+    private static String rdapSqlLikePattern(String pattern) {
+        return pattern.replace("!", "!!")
+                .replace("%", "!%")
+                .replace("_", "!_")
+                .replace("*", "%");
     }
 
     public Optional<DomainView> find(String rawName) {

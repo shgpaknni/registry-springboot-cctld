@@ -63,7 +63,7 @@ Spring Boot Actuator exposes:
 GET http://localhost:8081/actuator/health
 ```
 
-The RDAP service implements exact domain, nameserver, and registrar-entity lookups under RFC 9082/9083, with registrant details redacted. Unsupported RDAP query classes return HTTP 501 rather than being reported as unknown paths. Search queries are not implemented yet.
+The RDAP service supports exact domain, nameserver, and registrar-entity lookups plus a bounded subset of RFC 9082 search queries. Registrant details are redacted. Search queries accept one selector and at most one `*` wildcard; search results are capped at 100 objects.
 
 ```text
 GET  /rdap/help
@@ -73,7 +73,13 @@ GET  /rdap/nameserver/{name}
 HEAD /rdap/nameserver/{name}
 GET  /rdap/entity/{registrar-handle}
 HEAD /rdap/entity/{registrar-handle}
+GET  /rdap/domains?name={pattern}
+GET  /rdap/nameservers?name={pattern}
+GET  /rdap/entities?handle={pattern}
+GET  /rdap/entities?fn={pattern}
 ```
+
+Domain search supports `name`; nameserver search supports `name`; registrar entity search supports `handle` and `fn`. Other selectors (including nameserver-IP and domain-by-nameserver searches) and unsupported query classes return HTTP 501. Malformed search patterns return HTTP 400. Search results expose only registrar entity data; contact entity search is not implemented.
 
 EPP remains a separate TLS protocol listener because EPP is not HTTP.
 

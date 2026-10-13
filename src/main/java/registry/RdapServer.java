@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -57,9 +58,13 @@ public final class RdapServer implements AutoCloseable {
                 nameserver(ex, path.substring("/rdap/nameserver/".length()));
             } else if (path.startsWith("/rdap/entity/")) {
                 entity(ex, path.substring("/rdap/entity/".length()));
-            } else if (path.equals("/rdap/domains") || path.equals("/rdap/nameservers")
-                    || path.equals("/rdap/entities") || path.startsWith("/rdap/ip/")
-                    || path.startsWith("/rdap/autnum/")) {
+            } else if (path.equals("/rdap/domains")) {
+                domainSearch(ex);
+            } else if (path.equals("/rdap/nameservers")) {
+                nameserverSearch(ex);
+            } else if (path.equals("/rdap/entities")) {
+                entitySearch(ex);
+            } else if (path.startsWith("/rdap/ip/") || path.startsWith("/rdap/autnum/")) {
                 send(ex, 501, error(501, "Not Implemented", "This RDAP query type is not supported by this registry."));
             } else {
                 send(ex, 404, error(404, "Not Found", "Unknown RDAP path."));
@@ -85,6 +90,119 @@ public final class RdapServer implements AutoCloseable {
             return;
         }
         send(ex, 200, render(v.get()));
+    }
+
+    private record SearchParameter(String name, String value) {}
+
+    /** RFC 9082 defines one selector per search query. */
+    private SearchParameter searchParameter(HttpExchange ex) {
+        String raw = ex.getRequestURI().getRawQuery();
+        if (raw == null || raw.isBlank() || raw.indexOf('&') >= 0)
+            throw new RegistryException(2005, "Exactly one RDAP search parameter is required");
+        int equals = raw.indexOf('=');
+        if (equals <= 0 || equals == raw.length() - 1 || raw.indexOf('=', equals + 1) >= 0)
+            throw new RegistryException(2005, "Malformed RDAP search parameter");
+        try {
+            String name = URLDecoder.decode(raw.substring(0, equals), StandardCharsets.UTF_8);
+            String value = URLDecoder.decode(raw.substring(equals + 1), StandardCharsets.UTF_8);
+            if (name.isBlank() || value.isBlank())
+                throw new RegistryException(2005, "RDAP search parameter and value are required");
+            return new SearchParameter(name, value);
+        } catch (IllegalArgumentException e) {
+            throw new RegistryException(2005, "Invalid percent-encoding in RDAP search query");
+        }
+    }
+
+    private void domainSearch(HttpExchange ex) throws IOException {
+        final SearchParameter p;
+        try {
+            p = searchParameter(ex);
+        } catch (RegistryException e) {
+            send(ex, 400, error(400, "Bad Request", e.getMessage()));
+            return;
+        }
+        if (!"name".equals(p.name())) {
+            send(ex, 501, error(501, "Not Implemented", "Supported domain search selector: name."));
+            return;
+        }
+        try {
+            List<Registry.DomainView> found = reg.searchDomainsByName(p.value());
+            StringBuilder body = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"domainSearchResults\":[");
+            for (int i = 0; i < found.size(); i++) {
+                if (i > 0) body.append(',');
+                body.append(withoutConformance(render(found.get(i))));
+            }
+            send(ex, 200, body.append("]}").toString());
+        } catch (RegistryException e) {
+            sendSearchFailure(ex, e);
+        }
+    }
+
+    private void nameserverSearch(HttpExchange ex) throws IOException {
+        final SearchParameter p;
+        try {
+            p = searchParameter(ex);
+        } catch (RegistryException e) {
+            send(ex, 400, error(400, "Bad Request", e.getMessage()));
+            return;
+        }
+        if (!"name".equals(p.name())) {
+            send(ex, 501, error(501, "Not Implemented", "Supported nameserver search selector: name."));
+            return;
+        }
+        try {
+            List<Registry.RdapHostView> found = reg.searchHostsByName(p.value());
+            StringBuilder body = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"nameserverSearchResults\":[");
+            for (int i = 0; i < found.size(); i++) {
+                if (i > 0) body.append(',');
+                body.append(withoutConformance(renderNameserver(found.get(i))));
+            }
+            send(ex, 200, body.append("]}").toString());
+        } catch (RegistryException e) {
+            sendSearchFailure(ex, e);
+        }
+    }
+
+    private void entitySearch(HttpExchange ex) throws IOException {
+        final SearchParameter p;
+        try {
+            p = searchParameter(ex);
+        } catch (RegistryException e) {
+            send(ex, 400, error(400, "Bad Request", e.getMessage()));
+            return;
+        }
+        if (!"handle".equals(p.name()) && !"fn".equals(p.name())) {
+            send(ex, 501, error(501, "Not Implemented", "Supported registrar entity search selectors: handle and fn."));
+            return;
+        }
+        try {
+            List<Registry.RdapEntityView> found = "handle".equals(p.name())
+                    ? reg.searchRegistrarsByHandle(p.value())
+                    : reg.searchRegistrarsByName(p.value());
+            StringBuilder body = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"entitySearchResults\":[");
+            for (int i = 0; i < found.size(); i++) {
+                if (i > 0) body.append(',');
+                Registry.RdapEntityView entity = found.get(i);
+                body.append(registrarEntity(entity.handle(), entity.name()));
+            }
+            send(ex, 200, body.append("]}").toString());
+        } catch (RegistryException e) {
+            sendSearchFailure(ex, e);
+        }
+    }
+
+    private void sendSearchFailure(HttpExchange ex, RegistryException e) throws IOException {
+        if (e.code == 2005 || e.code == 2306) {
+            send(ex, 400, error(400, "Bad Request", e.getMessage()));
+        } else {
+            send(ex, 500, error(500, "Internal Error", "Unable to process RDAP search."));
+        }
+    }
+
+    private static String withoutConformance(String json) {
+        String prefix = "{\"rdapConformance\":[\"rdap_level_0\"],";
+        if (!json.startsWith(prefix)) throw new IllegalArgumentException("Unexpected RDAP object serialization");
+        return "{" + json.substring(prefix.length());
     }
 
     private void nameserver(HttpExchange ex, String raw) throws IOException {

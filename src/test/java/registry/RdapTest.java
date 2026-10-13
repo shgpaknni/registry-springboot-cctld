@@ -90,9 +90,51 @@ class RdapTest {
 
     @Test
     void unsupportedRdapQueryTypesReturn501() throws Exception {
-        var r = get("/rdap/domains?name=alpha.xx");
+        var r = get("/rdap/domains?nsIp=192.0.2.53");
         assertEquals(501, r.statusCode());
         assertTrue(r.body().contains("\"errorCode\":501"), r.body());
+        assertEquals(501, get("/rdap/nameservers?ip=192.0.2.53").statusCode());
+        assertEquals(501, get("/rdap/entities?unsupported=value").statusCode());
+    }
+
+    @Test
+    void domainSearchSupportsExactAndPartialNames() throws Exception {
+        var r = get("/rdap/domains?name=alpha*.xx");
+        assertEquals(200, r.statusCode(), r.body());
+        assertTrue(r.body().contains("\"domainSearchResults\":[{"), r.body());
+        assertTrue(r.body().contains("\"ldhName\":\"alpha.xx\""), r.body());
+
+        var exact = get("/rdap/domains?name=alpha.xx");
+        assertEquals(200, exact.statusCode(), exact.body());
+        assertTrue(exact.body().contains("alpha.xx"), exact.body());
+    }
+
+    @Test
+    void nameserverSearchReturnsPublicNameserverObjects() throws Exception {
+        reg.createHost("reg1", "ns1.example.net", List.of("192.0.2.53"), List.of("2001:db8::53"));
+        var r = get("/rdap/nameservers?name=ns1.example*.net");
+        assertEquals(200, r.statusCode(), r.body());
+        assertTrue(r.body().contains("\"nameserverSearchResults\":[{"), r.body());
+        assertTrue(r.body().contains("\"ldhName\":\"ns1.example.net\""), r.body());
+        assertTrue(r.body().contains("192.0.2.53"), r.body());
+    }
+
+    @Test
+    void registrarEntitySearchSupportsHandleAndName() throws Exception {
+        var handle = get("/rdap/entities?handle=reg*");
+        assertEquals(200, handle.statusCode(), handle.body());
+        assertTrue(handle.body().contains("\"entitySearchResults\":[{"), handle.body());
+        assertTrue(handle.body().contains("\"handle\":\"reg1\""), handle.body());
+
+        var name = get("/rdap/entities?fn=Registrar%20O*");
+        assertEquals(200, name.statusCode(), name.body());
+        assertTrue(name.body().contains("Registrar One"), name.body());
+    }
+
+    @Test
+    void rdapSearchRejectsMultipleAsterisksAndMultipleSelectors() throws Exception {
+        assertEquals(400, get("/rdap/domains?name=a*b*.xx").statusCode());
+        assertEquals(400, get("/rdap/domains?name=alpha.xx&name=beta.xx").statusCode());
     }
 
     @Test
