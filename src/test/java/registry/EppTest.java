@@ -138,6 +138,59 @@ class EppTest {
                 + "</domain:name></domain:" + verb + "></" + verb + ">";
     }
 
+
+    @Test
+    void rfc5734FrameRoundTripsWithBigEndianTotalLength() throws IOException {
+        String xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><epp/>";
+        byte[] payload = xml.getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+
+        EppServer.writeFrame(new DataOutputStream(bytes), xml);
+        byte[] frame = bytes.toByteArray();
+
+        assertEquals(payload.length + 4,
+                java.nio.ByteBuffer.wrap(frame, 0, 4).getInt());
+        assertArrayEquals(payload, EppServer.readFrame(
+                new DataInputStream(new ByteArrayInputStream(frame))));
+    }
+
+    @Test
+    void rfc5734RejectsInvalidLengthHeaders() {
+        for (int length : new int[] {
+                Integer.MIN_VALUE, -1, 0, 3, 4, Integer.MAX_VALUE
+        }) {
+            byte[] header = java.nio.ByteBuffer.allocate(4)
+                    .putInt(length).array();
+
+            assertThrows(IOException.class, () -> EppServer.readFrame(
+                    new DataInputStream(new ByteArrayInputStream(header))),
+                    "Invalid frame length accepted: " + length);
+        }
+    }
+
+    @Test
+    void rfc5734DistinguishesCleanEofFromTruncatedFrames() throws IOException {
+        assertNull(EppServer.readFrame(
+                new DataInputStream(new ByteArrayInputStream(new byte[0]))));
+
+        byte[] partialHeader = {0, 0, 0};
+        assertThrows(EOFException.class, () -> EppServer.readFrame(
+                new DataInputStream(new ByteArrayInputStream(partialHeader))));
+
+        byte[] missingBody = java.nio.ByteBuffer.allocate(4).putInt(6).array();
+        assertThrows(EOFException.class, () -> EppServer.readFrame(
+                new DataInputStream(new ByteArrayInputStream(missingBody))));
+    }
+
+    @Test
+    void rfc5734WriterRejectsEmptyAndOversizedFrames() {
+        assertThrows(IOException.class, () -> EppServer.writeFrame(
+                new DataOutputStream(new ByteArrayOutputStream()), ""));
+
+        String oversized = "x".repeat(1_048_577);
+        assertThrows(IOException.class, () -> EppServer.writeFrame(
+                new DataOutputStream(new ByteArrayOutputStream()), oversized));
+    }
     @Test
     void fullRegistrarSession() throws Exception {
         try (Client c = new Client(clientCtx("reg1"), server.port())) {
