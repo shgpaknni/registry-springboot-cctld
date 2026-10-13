@@ -1952,6 +1952,31 @@ public final class Registry {
         });
     }
 
+
+    /** DS records that belong in the parent zone: active delegations not on serverHold. */
+    public SortedMap<String, List<DsData>> zoneDsEntries() {
+        return read(c -> {
+            SortedMap<String, List<DsData>> result = new TreeMap<>();
+            for (Object[] x : rows(c, """
+                    SELECT d.name, ds.key_tag, ds.alg, ds.digest_type, ds.digest
+                    FROM domains d
+                    JOIN domain_ds ds ON ds.domain_name = d.name
+                    WHERE d.state IN ('ACTIVE','AUTORENEW_GRACE')
+                      AND d.server_hold = FALSE
+                    ORDER BY d.name, ds.key_tag, ds.alg, ds.digest_type
+                    """)) {
+                String name = (String) x[0];
+                result.computeIfAbsent(name, k -> new ArrayList<>())
+                        .add(new DsData(
+                                ((Number) x[1]).intValue(),
+                                ((Number) x[2]).intValue(),
+                                ((Number) x[3]).intValue(),
+                                (String) x[4]));
+            }
+            return result;
+        });
+    }
+
     /** Administrative hold: removes the domain from the zone without changing its lifecycle (FR-016, FR-017). */
     public void setServerHold(String actor, String rawName, boolean hold) {
         tx(c -> {

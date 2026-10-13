@@ -13,6 +13,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 
 @SpringBootApplication
 @EnableScheduling
@@ -86,10 +87,42 @@ public class RegistryApplication {
     @Bean
     ZoneWriter zoneWriter(
             Registry registry,
-            @Value("${registry.zone-file:./data/zone.txt}") String zoneFile) throws Exception {
-        Path file = Path.of(zoneFile);
-        Files.createDirectories(file.toAbsolutePath().getParent());
-        return new ZoneWriter(registry, file);
+            @Value("${registry.zone-file:./data/zone.txt}") String zoneFile,
+            @Value("${registry.dnssec.enabled:false}") boolean dnssecEnabled,
+            @Value("${registry.dnssec.signer-command:dnssec-signzone}") String signerCommand,
+            @Value("${registry.dnssec.verify-command:dnssec-verify}") String verifierCommand,
+            @Value("${registry.dnssec.key-directory:./data/dnssec-keys}") String keyDirectory,
+            @Value("${registry.dnssec.apex-ns:}") String apexNsCsv,
+            @Value("${registry.dnssec.soa.mname:}") String soaMname,
+            @Value("${registry.dnssec.soa.rname:}") String soaRname,
+            @Value("${registry.dnssec.soa.refresh:3600}") long refresh,
+            @Value("${registry.dnssec.soa.retry:600}") long retry,
+            @Value("${registry.dnssec.soa.expire:1209600}") long expire,
+            @Value("${registry.dnssec.soa.minimum:300}") long minimum) throws Exception {
+
+        Path file = Path.of(zoneFile).toAbsolutePath().normalize();
+        Files.createDirectories(file.getParent());
+
+        String origin = ZoneWriter.fqdn(registry.config().zone());
+        java.util.List<String> apexNs = java.util.Arrays.stream(apexNsCsv.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isBlank())
+                .toList();
+        if (apexNs.isEmpty()) {
+            apexNs = java.util.List.of("ns1." + origin, "ns2." + origin);
+        }
+
+        String mname = soaMname == null || soaMname.isBlank() ? apexNs.get(0) : soaMname;
+        String rname = soaRname == null || soaRname.isBlank()
+                ? "hostmaster." + origin : soaRname;
+
+        DnssecZoneSigner signer = dnssecEnabled
+                ? new DnssecZoneSigner(signerCommand, verifierCommand,
+                        Path.of(keyDirectory), origin)
+                : null;
+
+        return new ZoneWriter(registry, file, signer, apexNs,
+                mname, rname, refresh, retry, expire, minimum);
     }
 
     @Bean
