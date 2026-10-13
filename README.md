@@ -63,11 +63,16 @@ Spring Boot Actuator exposes:
 GET http://localhost:8081/actuator/health
 ```
 
-The existing RDAP service continues to serve:
+The RDAP service implements exact domain, nameserver, and registrar-entity lookups under RFC 9082/9083, with registrant details redacted. Unsupported RDAP query classes return HTTP 501 rather than being reported as unknown paths. Search queries are not implemented yet.
 
 ```text
-GET /rdap/help
-GET /rdap/domain/{name}
+GET  /rdap/help
+GET  /rdap/domain/{name}
+HEAD /rdap/domain/{name}
+GET  /rdap/nameserver/{name}
+HEAD /rdap/nameserver/{name}
+GET  /rdap/entity/{registrar-handle}
+HEAD /rdap/entity/{registrar-handle}
 ```
 
 EPP remains a separate TLS protocol listener because EPP is not HTTP.

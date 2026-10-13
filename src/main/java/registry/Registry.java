@@ -26,6 +26,15 @@ public final class Registry {
     public record DomainView(String name, String sponsor, String registrant, String state, boolean serverHold,
                              long created, long expires, List<String> ns) {}
 
+    /** Public, privacy-safe nameserver representation for RDAP (RFC 9082/9083). */
+    public record RdapHostView(String name, String sponsor, List<String> ipv4, List<String> ipv6,
+                               long created, long updated, boolean linked) {
+        public RdapHostView {
+            ipv4 = List.copyOf(ipv4);
+            ipv6 = List.copyOf(ipv6);
+        }
+    }
+
     public record RestoreReport(
             String preData,
             String postData,
@@ -1776,6 +1785,24 @@ public final class Registry {
     }
 
     /** Public view (RDAP). */
+    /** Public RDAP nameserver lookup. Does not require registrar authentication and exposes no credentials. */
+    public Optional<RdapHostView> findHost(String rawName) {
+        String name = Names.host(rawName);
+        return read(c -> {
+            List<Object[]> r = rows(c,
+                    "SELECT registrar_id, created, updated FROM hosts WHERE name=?", name);
+            if (r.isEmpty()) return Optional.empty();
+            Object[] x = r.get(0);
+            String sponsor = (String) x[0];
+            List<String> ipv4 = hostAddresses(c, name, 4);
+            List<String> ipv6 = hostAddresses(c, name, 6);
+            boolean linked = !rows(c,
+                    "SELECT 1 FROM domain_ns WHERE ns=? LIMIT 1", name).isEmpty();
+            return Optional.of(new RdapHostView(name, sponsor, ipv4, ipv6,
+                    num(x[1]), num(x[2]), linked));
+        });
+    }
+
     public Optional<DomainView> find(String rawName) {
         String name = Names.parse(rawName, cfg);
         return read(c -> {
