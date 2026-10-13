@@ -72,6 +72,30 @@ class RdapTest {
     }
 
     @Test
+    void nameserverAndRegistrarEntityLookupsReturnRdapObjects() throws Exception {
+        reg.createHost("reg1", "ns1.example.net", List.of("192.0.2.53"), List.of("2001:db8::53"));
+
+        var ns = get("/rdap/nameserver/ns1.example.net");
+        assertEquals(200, ns.statusCode());
+        assertTrue(ns.body().contains("\"objectClassName\":\"nameserver\""), ns.body());
+        assertTrue(ns.body().contains("\"192.0.2.53\""), ns.body());
+        assertTrue(ns.body().contains("\"2001:db8::53\""), ns.body());
+
+        var entity = get("/rdap/entity/reg1");
+        assertEquals(200, entity.statusCode());
+        assertTrue(entity.body().contains("\"objectClassName\":\"entity\""), entity.body());
+        assertTrue(entity.body().contains("\"handle\":\"reg1\""), entity.body());
+        assertTrue(entity.body().contains("Registrar One"), entity.body());
+    }
+
+    @Test
+    void unsupportedRdapQueryTypesReturn501() throws Exception {
+        var r = get("/rdap/domains?name=alpha.xx");
+        assertEquals(501, r.statusCode());
+        assertTrue(r.body().contains("\"errorCode\":501"), r.body());
+    }
+
+    @Test
     void rateLimitReturns429ThenRecovers() throws Exception {
         for (int i = 0; i < 5; i++) assertEquals(200, get("/rdap/domain/alpha.xx").statusCode());
         var limited = get("/rdap/domain/alpha.xx");

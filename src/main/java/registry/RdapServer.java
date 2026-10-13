@@ -39,7 +39,8 @@ public final class RdapServer implements AutoCloseable {
     private void handle(HttpExchange ex) throws IOException {
         try {
             if (!"GET".equals(ex.getRequestMethod()) && !"HEAD".equals(ex.getRequestMethod())) {
-                send(ex, 405, error(405, "Method Not Allowed", "Only GET is supported."));
+                ex.getResponseHeaders().set("Allow", "GET, HEAD");
+                send(ex, 405, error(405, "Method Not Allowed", "Only GET and HEAD are supported."));
                 return;
             }
             if (!limiter.tryAcquire(ex.getRemoteAddress().getAddress().getHostAddress())) {
@@ -47,11 +48,19 @@ public final class RdapServer implements AutoCloseable {
                 send(ex, 429, error(429, "Too Many Requests", "Rate limit exceeded."));
                 return;
             }
-            String path = ex.getRequestURI().getRawPath();
+            String path = ex.getRequestURI().getPath();
             if (path.equals("/rdap/help")) {
-                send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"],\"notices\":[{\"title\":\"Help\",\"description\":[\"Query /rdap/domain/{name}.\"]}]}");
+                send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"],\"notices\":[{\"title\":\"Help\",\"description\":[\"Supported lookups: /rdap/domain/{name}, /rdap/nameserver/{name}, and /rdap/entity/{registrar-handle}. Unsupported query types return 501.\"]}]}");
             } else if (path.startsWith("/rdap/domain/")) {
                 domain(ex, path.substring("/rdap/domain/".length()));
+            } else if (path.startsWith("/rdap/nameserver/")) {
+                nameserver(ex, path.substring("/rdap/nameserver/".length()));
+            } else if (path.startsWith("/rdap/entity/")) {
+                entity(ex, path.substring("/rdap/entity/".length()));
+            } else if (path.equals("/rdap/domains") || path.equals("/rdap/nameservers")
+                    || path.equals("/rdap/entities") || path.startsWith("/rdap/ip/")
+                    || path.startsWith("/rdap/autnum/")) {
+                send(ex, 501, error(501, "Not Implemented", "This RDAP query type is not supported by this registry."));
             } else {
                 send(ex, 404, error(404, "Not Found", "Unknown RDAP path."));
             }
@@ -76,6 +85,59 @@ public final class RdapServer implements AutoCloseable {
             return;
         }
         send(ex, 200, render(v.get()));
+    }
+
+    private void nameserver(HttpExchange ex, String raw) throws IOException {
+        try {
+            Optional<Registry.RdapHostView> v = reg.findHost(raw);
+            if (v.isEmpty()) {
+                send(ex, 404, error(404, "Not Found", "Nameserver not registered."));
+                return;
+            }
+            send(ex, 200, renderNameserver(v.get()));
+        } catch (RegistryException e) {
+            if (e.code == 2005) send(ex, 400, error(400, "Bad Request", "Malformed nameserver name."));
+            else send(ex, 404, error(404, "Not Found", "Nameserver not found."));
+        }
+    }
+
+    private void entity(HttpExchange ex, String rawHandle) throws IOException {
+        String handle = rawHandle == null ? "" : rawHandle.trim();
+        String status = reg.registrarStatus(handle);
+        if (handle.isBlank() || status == null) {
+            send(ex, 404, error(404, "Not Found", "Registrar entity not found."));
+            return;
+        }
+        String entity = registrarEntity(handle, reg.registrarName(handle));
+        send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"]," + entity.substring(1));
+    }
+
+    private String renderNameserver(Registry.RdapHostView h) {
+        StringBuilder sb = new StringBuilder("{\"rdapConformance\":[\"rdap_level_0\"],\"objectClassName\":\"nameserver\",\"ldhName\":")
+                .append(q(h.name()));
+        if (!h.ipv4().isEmpty() || !h.ipv6().isEmpty()) {
+            sb.append(",\"ipAddresses\":{\"v4\":[");
+            for (int i = 0; i < h.ipv4().size(); i++)
+                sb.append(i == 0 ? "" : ",").append(q(h.ipv4().get(i)));
+            sb.append("],\"v6\":[");
+            for (int i = 0; i < h.ipv6().size(); i++)
+                sb.append(i == 0 ? "" : ",").append(q(h.ipv6().get(i)));
+            sb.append("]}");
+        }
+        sb.append(",\"events\":[{\"eventAction\":\"registration\",\"eventDate\":")
+                .append(q(Instant.ofEpochSecond(h.created()).toString()))
+                .append("},{\"eventAction\":\"last changed\",\"eventDate\":")
+                .append(q(Instant.ofEpochSecond(h.updated()).toString())).append("}]")
+                .append(",\"entities\":[")
+                .append(registrarEntity(h.sponsor(), reg.registrarName(h.sponsor())))
+                .append("]}");
+        return sb.toString();
+    }
+
+    private static String registrarEntity(String handle, String name) {
+        return "{\"objectClassName\":\"entity\",\"handle\":" + q(handle)
+                + ",\"roles\":[\"registrar\"],\"vcardArray\":[\"vcard\",[[\"version\",{},\"text\",\"4.0\"],[\"fn\",{},\"text\","
+                + q(name) + "]]]}";
     }
 
     private String render(Registry.DomainView d) {
