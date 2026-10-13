@@ -1,5 +1,9 @@
 package registry;
 
+
+
+import java.util.List;
+import java.time.format.DateTimeParseException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -873,78 +877,175 @@ public final class EppServer implements AutoCloseable {
     }
 
 
+
+
     private String domainRestore(Session st, Element obj, Element ext, String cl) {
-        Element upd = ext == null ? null : kid(ext, "update");
-        Element restore = upd == null ? null : kid(upd, "restore");
-        if (restore == null || !"request".equals(restore.getAttribute("op")))
-            throw new RegistryException(2101, "Unimplemented command: only RGP restore is supported for update");
-        reg.restoreDomain(st.registrar, need(obj, "name"));
-        return response(1000, "Command completed successfully", null, cl);
-    }
-
-    // ---------------------------------------------------------------- RFC 5732 HOST EPP
-
-    private String hostCheck(
-            Session st,
-            Element obj,
-            String cl) {
-
-        List<String> names = new ArrayList<>();
-
-        for (Element n : kids(obj)) {
-
-            if (!"name".equals(n.getLocalName())) {
-                continue;
-            }
-
-            names.add(n.getTextContent().trim());
-        }
-
-        if (names.isEmpty()) {
+        if (ext == null) {
             throw new RegistryException(
                     2003,
-                    "Required parameter missing: name"
+                    "RGP restore extension required"
             );
         }
 
-        List<Registry.HostAvailability> result =
-                reg.checkHosts(st.registrar, names);
+        Element rgpUpdate = null;
 
-        StringBuilder body =
-                new StringBuilder(
-                        "<resData><host:chkData xmlns:host=\""
-                                + NS_HOST
-                                + "\">"
-                );
-
-        for (Registry.HostAvailability a : result) {
-
-            body.append("<host:cd>")
-                    .append("<host:name avail=\"")
-                    .append(a.available() ? "1" : "0")
-                    .append("\">")
-                    .append(esc(a.name()))
-                    .append("</host:name>");
-
-            if (!a.available() && a.reason() != null) {
-                body.append("<host:reason>")
-                        .append(esc(a.reason()))
-                        .append("</host:reason>");
+        for (Element e : kids(ext)) {
+            if ("update".equals(e.getLocalName())
+                    && NS_RGP.equals(e.getNamespaceURI())) {
+                rgpUpdate = e;
+                break;
             }
-
-            body.append("</host:cd>");
         }
 
-        body.append("</host:chkData></resData>");
+        if (rgpUpdate == null) {
+            throw new RegistryException(
+                    2003,
+                    "RGP update extension required"
+            );
+        }
 
-        return response(
-                1000,
-                "Command completed successfully",
-                body.toString(),
-                cl
+        Element restore = kid(rgpUpdate, "restore");
+
+        if (restore == null) {
+            throw new RegistryException(
+                    2003,
+                    "RGP restore element required"
+            );
+        }
+
+        String op = restore.getAttribute("op");
+
+        String name = need(obj, "name");
+
+        if ("request".equals(op)) {
+
+            reg.restoreDomain(
+                    st.registrar,
+                    name,
+                    "request",
+                    null
+            );
+
+            return response(
+                    1001,
+                    "Command completed successfully; action pending",
+                    null,
+                    cl
+            );
+        }
+
+        if ("report".equals(op)) {
+
+            Registry.RestoreReport report =
+                    parseRgpReport(restore);
+
+            reg.restoreDomain(
+                    st.registrar,
+                    name,
+                    "report",
+                    report
+            );
+
+            return response(
+                    1000,
+                    "Command completed successfully",
+                    null,
+                    cl
+            );
+        }
+
+        throw new RegistryException(
+                2003,
+                "Invalid RGP restore operation"
         );
     }
 
+
+
+    private static Registry.RestoreReport parseRgpReport(Element report) {
+
+        String preData =
+                text(report, "preData");
+
+        String postData =
+                text(report, "postData");
+
+        String delTime =
+                text(report, "delTime");
+
+        String resTime =
+                text(report, "resTime");
+
+        String resReason =
+                text(report, "resReason");
+
+        String other =
+                text(report, "other");
+
+        List<String> statements =
+                new ArrayList<>();
+
+        for (Element e : kids(report)) {
+            if ("statement".equals(e.getLocalName())) {
+                String value =
+                        e.getTextContent().trim();
+
+                if (!value.isEmpty()) {
+                    statements.add(value);
+                }
+            }
+        }
+
+        /*
+         * RFC 3915 restore reports require:
+         *   preData
+         *   postData
+         *   delTime
+         *   resTime
+         *   resReason
+         *   exactly two statements
+         */
+        if (preData == null || preData.isBlank()
+                || postData == null || postData.isBlank()
+                || delTime == null || delTime.isBlank()
+                || resTime == null || resTime.isBlank()
+                || resReason == null || resReason.isBlank()
+                || statements.size() != 2) {
+
+            throw new RegistryException(
+                    2003,
+                    "Invalid RGP restore report"
+            );
+        }
+
+        long delEpoch;
+        long resEpoch;
+
+        try {
+            delEpoch =
+                    Instant.parse(delTime).getEpochSecond();
+
+            resEpoch =
+                    Instant.parse(resTime).getEpochSecond();
+
+        } catch (DateTimeParseException e) {
+
+            throw new RegistryException(
+                    2005,
+                    "Invalid date-time value"
+            );
+        }
+
+        return new Registry.RestoreReport(
+                preData,
+                postData,
+                delEpoch,
+                resEpoch,
+                resReason,
+                statements,
+                other
+        );
+    }
 
     private String hostCreate(
             Session st,

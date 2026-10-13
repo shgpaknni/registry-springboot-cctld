@@ -26,6 +26,16 @@ public final class Registry {
     public record DomainView(String name, String sponsor, String registrant, String state, boolean serverHold,
                              long created, long expires, List<String> ns) {}
 
+    public record RestoreReport(
+            String preData,
+            String postData,
+            long delTime,
+            long resTime,
+            String resReason,
+            List<String> statements,
+            String other
+    ) {}
+
     public record Availability(String name, boolean available, String reason) {}
 
     public enum DeleteOutcome { PURGED, REDEMPTION }
@@ -48,15 +58,17 @@ public final class Registry {
      * IPv6:
      *     validated using java.net.InetAddress
      */
+    // RFC 3915: registry-defined period for receiving restore report.
+    private static final long RESTORE_REPORT_WINDOW_SECONDS = 24L * 60L * 60L;
     private static final Pattern IPV4 =
             Pattern.compile("^([0-9]{1,3}\\.){3}[0-9]{1,3}$");
-
-    private static final SecureRandom RNG = new SecureRandom();
 
     private final Db db;
     private final Config cfg;
     private final Clock clock;
     private final ReentrantLock writeLock = new ReentrantLock();
+    private static final java.security.SecureRandom RNG = new java.security.SecureRandom();
+
     private final String dummyHash;
 
     public Registry(Db db, Config cfg, Clock clock) {
@@ -1610,25 +1622,153 @@ public final class Registry {
         });
     }
 
-    public DomainView restoreDomain(String registrar, String rawName) {
-        return tx(c -> {
+
+
+    public void restoreDomain(
+            String registrar,
+            String rawName,
+            String op,
+            RestoreReport report
+    ) {
+
+        tx(c -> {
+
             requireActive(c, registrar);
-            String name = Names.parse(rawName, cfg);
+
+            String name =
+                    Names.parse(rawName, cfg);
+
             Row r = owned(c, registrar, name);
-            if (!r.state().equals("REDEMPTION")) throw new RegistryException(2304, "Object is not in redemption");
-            charge(c, registrar, cfg.restoreFee(), "RESTORE", name);
+
             long now = now();
-            long exp = r.expires();
-            if (exp <= now) {
-                charge(c, registrar, cfg.renewFeePerYear(), "RENEW", name);
-                exp = addYears(now, 1);
+
+            // ------------------------------------------------
+            // RFC 3915 restore request
+            // REDEMPTION -> PENDING_RESTORE
+            // ------------------------------------------------
+
+            if ("request".equals(op)) {
+
+                if (!"REDEMPTION".equals(r.state())) {
+
+                    throw new RegistryException(
+                            2304,
+                            "Object is not in redemption"
+                    );
+                }
+
+                update(
+                        c,
+                        "UPDATE domains "
+                                + "SET state='PENDING_RESTORE', "
+                                + "state_since=? "
+                                + "WHERE name=?",
+                        now,
+                        name
+                );
+
+                audit(
+                        c,
+                        registrar,
+                        "DOMAIN_RESTORE_REQUEST",
+                        name,
+                        ""
+                );
+
+                outbox(
+                        c,
+                        "ZONE_CHANGE",
+                        name
+                );
+
+                return null;
             }
-            update(c, "UPDATE domains SET state='ACTIVE', state_since=?, expires=? WHERE name=?", now, exp, name);
-            audit(c, registrar, "DOMAIN_RESTORE", name, "");
-            outbox(c, "ZONE_CHANGE", name);
-            return view(c, fetch(c, name));
+
+
+            // ------------------------------------------------
+            // RFC 3915 restore report
+            // PENDING_RESTORE -> ACTIVE
+            // ------------------------------------------------
+
+            if ("report".equals(op)) {
+
+                if (!"PENDING_RESTORE".equals(r.state())) {
+
+                    throw new RegistryException(
+                            2304,
+                            "Object is not pending restore"
+                    );
+                }
+
+                if (report == null) {
+
+                    throw new RegistryException(
+                            2003,
+                            "Invalid RGP restore report"
+                    );
+                }
+
+                if (report.preData() == null
+                        || report.preData().isBlank()
+                        || report.postData() == null
+                        || report.postData().isBlank()
+                        || report.resReason() == null
+                        || report.resReason().isBlank()
+                        || report.statements() == null
+                        || report.statements().size() != 2) {
+
+                    throw new RegistryException(
+                            2003,
+                            "Invalid RGP restore report"
+                    );
+                }
+
+                if (report.delTime() <= 0
+                        || report.resTime() <= 0) {
+
+                    throw new RegistryException(
+                            2005,
+                            "Invalid date-time value"
+                    );
+                }
+
+                charge(c, registrar, 4000, "RESTORE", name);
+                update(
+                        c,
+                        "UPDATE domains "
+                                + "SET state='ACTIVE', "
+                                + "state_since=? "
+                                + "WHERE name=?",
+                        now,
+                        name
+                );
+
+                audit(
+                        c,
+                        registrar,
+                        "DOMAIN_RESTORE_REPORT",
+                        name,
+                        ""
+                );
+
+                outbox(
+                        c,
+                        "ZONE_CHANGE",
+                        name
+                );
+
+                return null;
+            }
+
+
+            throw new RegistryException(
+                    2003,
+                    "Invalid RGP restore operation"
+            );
         });
     }
+
+
 
     /** Sponsor-only view (EPP info). */
     public DomainView domainInfo(String registrar, String rawName) {
@@ -1669,44 +1809,137 @@ public final class Registry {
     /** Moves domains through grace, redemption and pending-delete as time passes (FR-013, FR-015). Returns transitions made. */
     public int runLifecycle() {
         return tx(c -> {
-            long grace = cfg.autoRenewGrace().toSeconds(), red = cfg.redemption().toSeconds(), pd = cfg.pendingDelete().toSeconds();
+            long grace = cfg.autoRenewGrace().toSeconds();
+            long red = cfg.redemption().toSeconds();
+            long pd = cfg.pendingDelete().toSeconds();
+
             int total = 0;
+
             for (int pass = 0; pass < 8; pass++) {
                 long now = now();
-                List<Object[]> due = rows(c, "SELECT name,state,expires,state_since FROM domains WHERE "
-                        + "(state='ACTIVE' AND expires<=?) OR (state='AUTORENEW_GRACE' AND expires+?<=?) "
-                        + "OR (state='REDEMPTION' AND state_since+?<=?) OR (state='PENDING_DELETE' AND state_since+?<=?)",
-                        now, grace, now, red, now, pd, now);
-                if (due.isEmpty()) break;
+
+                List<Object[]> due = rows(
+                        c,
+                        "SELECT name,state,expires,state_since FROM domains WHERE "
+                                + "(state='ACTIVE' AND expires<=?) "
+                                + "OR (state='AUTORENEW_GRACE' AND expires+?<=?) "
+                                + "OR (state='REDEMPTION' AND state_since+?<=?) "
+                                + "OR (state='PENDING_DELETE' AND state_since+?<=?) "
+                                + "OR (state='PENDING_RESTORE' AND state_since+?<=?)",
+                        now,
+                        grace,
+                        now,
+                        red,
+                        now,
+                        pd,
+                        now,
+                        RESTORE_REPORT_WINDOW_SECONDS,
+                        now
+                );
+
+                if (due.isEmpty()) {
+                    break;
+                }
+
                 for (Object[] x : due) {
-                    String name = (String) x[0], st = (String) x[1];
-                    long exp = num(x[2]), since = num(x[3]);
+                    String name = (String) x[0];
+                    String st = (String) x[1];
+                    long exp = num(x[2]);
+                    long since = num(x[3]);
+
                     switch (st) {
                         case "ACTIVE" -> {
-                            update(c, "UPDATE domains SET state='AUTORENEW_GRACE', state_since=? WHERE name=?", exp, name);
-                            audit(c, "system", "LIFECYCLE", name, "ACTIVE -> AUTORENEW_GRACE");
+                            update(
+                                    c,
+                                    "UPDATE domains SET state='AUTORENEW_GRACE', state_since=? WHERE name=?",
+                                    exp,
+                                    name
+                            );
+                            audit(
+                                    c,
+                                    "system",
+                                    "LIFECYCLE",
+                                    name,
+                                    "ACTIVE -> AUTORENEW_GRACE"
+                            );
                         }
+
                         case "AUTORENEW_GRACE" -> {
-                            update(c, "UPDATE domains SET state='REDEMPTION', state_since=? WHERE name=?", exp + grace, name);
-                            audit(c, "system", "LIFECYCLE", name, "AUTORENEW_GRACE -> REDEMPTION");
+                            update(
+                                    c,
+                                    "UPDATE domains SET state='REDEMPTION', state_since=? WHERE name=?",
+                                    exp + grace,
+                                    name
+                            );
+                            audit(
+                                    c,
+                                    "system",
+                                    "LIFECYCLE",
+                                    name,
+                                    "AUTORENEW_GRACE -> REDEMPTION"
+                            );
                             outbox(c, "ZONE_CHANGE", name);
                         }
+
                         case "REDEMPTION" -> {
-                            update(c, "UPDATE domains SET state='PENDING_DELETE', state_since=? WHERE name=?", since + red, name);
-                            audit(c, "system", "LIFECYCLE", name, "REDEMPTION -> PENDING_DELETE");
+                            update(
+                                    c,
+                                    "UPDATE domains SET state='PENDING_DELETE', state_since=? WHERE name=?",
+                                    since + red,
+                                    name
+                            );
+                            audit(
+                                    c,
+                                    "system",
+                                    "LIFECYCLE",
+                                    name,
+                                    "REDEMPTION -> PENDING_DELETE"
+                            );
                         }
+
+                        case "PENDING_RESTORE" -> {
+                            update(
+                                    c,
+                                    "UPDATE domains SET state='REDEMPTION', state_since=? WHERE name=?",
+                                    now,
+                                    name
+                            );
+                            audit(
+                                    c,
+                                    "system",
+                                    "LIFECYCLE",
+                                    name,
+                                    "PENDING_RESTORE -> REDEMPTION"
+                            );
+                        }
+
+                        case "PENDING_DELETE" -> {
+                            update(
+                                    c,
+                                    "DELETE FROM domains WHERE name=?",
+                                    name
+                            );
+                            audit(
+                                    c,
+                                    "system",
+                                    "LIFECYCLE",
+                                    name,
+                                    "PURGED"
+                            );
+                        }
+
                         default -> {
-                            update(c, "DELETE FROM domains WHERE name=?", name);
-                            audit(c, "system", "LIFECYCLE", name, "PURGED");
+                            // Defensive: the query should only return states handled above.
                         }
                     }
+
                     total++;
                 }
             }
+
             return total;
         });
     }
-
     /** Domains that belong in the published zone: ACTIVE or AUTORENEW_GRACE, not on serverHold (FR-017). */
     public SortedMap<String, List<String>> zoneEntries() {
         return read(c -> {

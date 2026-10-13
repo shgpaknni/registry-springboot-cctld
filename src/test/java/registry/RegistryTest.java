@@ -135,8 +135,22 @@ class RegistryTest {
         assertEquals("REDEMPTION", reg.find("alpha.xx").get().state());
         assertFalse(reg.zoneEntries().containsKey("alpha.xx"));
         assertEquals(98_000, reg.balance("reg1"));                                 // no refund
-        assertEquals(2201, code(() -> reg.restoreDomain("reg2", "alpha.xx")));
-        reg.restoreDomain("reg1", "alpha.xx");
+        assertEquals(2201, code(() -> reg.restoreDomain("reg2", "alpha.xx", "request", null)));
+        reg.restoreDomain("reg1", "alpha.xx", "request", null);
+        assertEquals("PENDING_RESTORE", reg.find("alpha.xx").get().state());
+
+        long now = clock.instant().getEpochSecond();
+        Registry.RestoreReport report = new Registry.RestoreReport(
+                "alpha.xx pre-restore data",
+                "alpha.xx post-restore data",
+                now - 3600,
+                now,
+                "Restoring the domain",
+                java.util.List.of("Statement 1", "Statement 2"),
+                null
+        );
+
+        reg.restoreDomain("reg1", "alpha.xx", "report", report);
         assertEquals("ACTIVE", reg.find("alpha.xx").get().state());
         assertEquals(98_000 - 4_000, reg.balance("reg1"));
         assertTrue(reg.zoneEntries().containsKey("alpha.xx"));

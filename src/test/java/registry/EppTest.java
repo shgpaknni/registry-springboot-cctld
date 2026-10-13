@@ -185,8 +185,259 @@ class EppTest {
             assertTrue(c.cmd(dom("info", "alpha.xx")).contains("redemptionPeriod"));
             String restore = "<update><domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\"><domain:name>alpha.xx</domain:name></domain:update></update>"
                     + "<extension><rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\"><rgp:restore op=\"request\"/></rgp:update></extension>";
-            assertEquals(1000, code(c.cmd(restore)));
-            assertEquals("ACTIVE", reg.find("alpha.xx").get().state());
+            assertEquals(1001, code(c.cmd(restore)));
+            assertEquals("PENDING_RESTORE", reg.find("alpha.xx").get().state());
+        }
+    }
+
+    @Test
+    void rgpRestoreRequestMovesDomainToPendingRestore() throws Exception {
+        TestClock clock = (TestClock) reg.clock();
+
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-request.xx", 1))));
+
+            clock.advance(java.time.Duration.ofDays(10));
+
+            assertEquals(1001, code(c.cmd(dom("delete", "rgp-request.xx"))));
+            assertEquals("REDEMPTION", reg.find("rgp-request.xx").get().state());
+
+            String request =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-request.xx</domain:name>" +
+                    "</domain:update>" +
+                    "</update>" +
+                    "<extension>" +
+                    "<rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"request\"/>" +
+                    "</rgp:update>" +
+                    "</extension>";
+
+            assertEquals(1001, code(c.cmd(request)));
+            assertEquals("PENDING_RESTORE", reg.find("rgp-request.xx").get().state());
+        }
+    }
+
+    @Test
+    void rgpRestoreReportMovesPendingRestoreToActive() throws Exception {
+        TestClock clock = (TestClock) reg.clock();
+
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-report.xx", 1))));
+
+            clock.advance(java.time.Duration.ofDays(10));
+
+            assertEquals(1001, code(c.cmd(dom("delete", "rgp-report.xx"))));
+
+            String request =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-report.xx</domain:name>" +
+                    "</domain:update>" +
+                    "</update>" +
+                    "<extension>" +
+                    "<rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"request\"/>" +
+                    "</rgp:update>" +
+                    "</extension>";
+
+            assertEquals(1001, code(c.cmd(request)));
+            assertEquals("PENDING_RESTORE", reg.find("rgp-report.xx").get().state());
+
+            String report =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-report.xx</domain:name>" +
+                    "</domain:update>" +
+                    "</update>" +
+                    "<extension>" +
+                    "<rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"report\">" +
+                    "<rgp:preData>before</rgp:preData>" +
+                    "<rgp:postData>after</rgp:postData>" +
+                    "<rgp:delTime>2026-10-05T00:00:00Z</rgp:delTime>" +
+                    "<rgp:resTime>2026-10-05T01:00:00Z</rgp:resTime>" +
+                    "<rgp:resReason>customer-request</rgp:resReason>" +
+                    "<rgp:statement>statement-one</rgp:statement>" +
+                    "<rgp:statement>statement-two</rgp:statement>" +
+                    "<rgp:other>none</rgp:other>" +
+                    "</rgp:restore>" +
+                    "</rgp:update>" +
+                    "</extension>";
+
+            assertEquals(1000, code(c.cmd(report)));
+            assertEquals("ACTIVE", reg.find("rgp-report.xx").get().state());
+        }
+    }
+
+    @Test
+    void rgpRestoreRequestOutsideRedemptionIsRejected() throws Exception {
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-state.xx", 1))));
+
+            String request =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-state.xx</domain:name>" +
+                    "</domain:update>" +
+                    "</update>" +
+                    "<extension>" +
+                    "<rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"request\"/>" +
+                    "</rgp:update>" +
+                    "</extension>";
+
+            assertEquals(2304, code(c.cmd(request)));
+            assertEquals("ACTIVE", reg.find("rgp-state.xx").get().state());
+        }
+    }
+
+    @Test
+    void rgpRestoreReportBeforeRequestIsRejected() throws Exception {
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-before.xx", 1))));
+
+            String report =
+                    "<update>" +
+                    "<domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-before.xx</domain:name>" +
+                    "</domain:update>" +
+                    "</update>" +
+                    "<extension>" +
+                    "<rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"report\">" +
+                    "<rgp:preData>before</rgp:preData>" +
+                    "<rgp:postData>after</rgp:postData>" +
+                    "<rgp:delTime>2026-10-05T00:00:00Z</rgp:delTime>" +
+                    "<rgp:resTime>2026-10-05T01:00:00Z</rgp:resTime>" +
+                    "<rgp:resReason>customer-request</rgp:resReason>" +
+                    "<rgp:statement>statement-one</rgp:statement>" +
+                    "<rgp:statement>statement-two</rgp:statement>" +
+                    "</rgp:restore>" +
+                    "</rgp:update>" +
+                    "</extension>";
+
+            assertEquals(2304, code(c.cmd(report)));
+        }
+    }
+
+    @Test
+    void rgpRestoreReportRequiresAllMandatoryFields() throws Exception {
+        TestClock clock = (TestClock) reg.clock();
+
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-fields.xx", 1))));
+
+            clock.advance(java.time.Duration.ofDays(10));
+            assertEquals(1001, code(c.cmd(dom("delete", "rgp-fields.xx"))));
+
+            String request =
+                    "<update><domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-fields.xx</domain:name></domain:update></update>" +
+                    "<extension><rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"request\"/></rgp:update></extension>";
+
+            assertEquals(1001, code(c.cmd(request)));
+
+            String badReport =
+                    "<update><domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-fields.xx</domain:name></domain:update></update>" +
+                    "<extension><rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"report\">" +
+                    "<rgp:preData>before</rgp:preData>" +
+                    "<rgp:postData>after</rgp:postData>" +
+                    "<rgp:delTime>2026-10-05T00:00:00Z</rgp:delTime>" +
+                    "<rgp:resTime>2026-10-05T01:00:00Z</rgp:resTime>" +
+                    "<rgp:resReason>customer-request</rgp:resReason>" +
+                    "<rgp:statement>only-one</rgp:statement>" +
+                    "</rgp:restore></rgp:update></extension>";
+
+            assertEquals(2003, code(c.cmd(badReport)));
+            assertEquals("PENDING_RESTORE", reg.find("rgp-fields.xx").get().state());
+        }
+    }
+
+    @Test
+    void rgpRestoreReportRejectsInvalidDateTime() throws Exception {
+        TestClock clock = (TestClock) reg.clock();
+
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-date.xx", 1))));
+
+            clock.advance(java.time.Duration.ofDays(10));
+            assertEquals(1001, code(c.cmd(dom("delete", "rgp-date.xx"))));
+
+            String request =
+                    "<update><domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-date.xx</domain:name></domain:update></update>" +
+                    "<extension><rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"request\"/></rgp:update></extension>";
+
+            assertEquals(1001, code(c.cmd(request)));
+
+            String badReport =
+                    "<update><domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-date.xx</domain:name></domain:update></update>" +
+                    "<extension><rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"report\">" +
+                    "<rgp:preData>before</rgp:preData>" +
+                    "<rgp:postData>after</rgp:postData>" +
+                    "<rgp:delTime>NOT-A-DATE</rgp:delTime>" +
+                    "<rgp:resTime>2026-10-05T01:00:00Z</rgp:resTime>" +
+                    "<rgp:resReason>customer-request</rgp:resReason>" +
+                    "<rgp:statement>one</rgp:statement>" +
+                    "<rgp:statement>two</rgp:statement>" +
+                    "</rgp:restore></rgp:update></extension>";
+
+            assertEquals(2005, code(c.cmd(badReport)));
+        }
+    }
+
+    @Test
+    void rgpPendingRestoreExpiresBackToRedemption() throws Exception {
+        TestClock clock = (TestClock) reg.clock();
+
+        try (Client c = new Client(clientCtx("reg1"), server.port())) {
+            c.read();
+            assertEquals(1000, code(c.login("reg1", PASS1)));
+            assertEquals(1000, code(c.cmd(CONTACT)));
+            assertEquals(1000, code(c.cmd(createDomain("rgp-expire.xx", 1))));
+
+            clock.advance(java.time.Duration.ofDays(10));
+            assertEquals(1001, code(c.cmd(dom("delete", "rgp-expire.xx"))));
+
+            String request =
+                    "<update><domain:update xmlns:domain=\"urn:ietf:params:xml:ns:domain-1.0\">" +
+                    "<domain:name>rgp-expire.xx</domain:name></domain:update></update>" +
+                    "<extension><rgp:update xmlns:rgp=\"urn:ietf:params:xml:ns:rgp-1.0\">" +
+                    "<rgp:restore op=\"request\"/></rgp:update></extension>";
+
+            assertEquals(1001, code(c.cmd(request)));
+            assertEquals("PENDING_RESTORE", reg.find("rgp-expire.xx").get().state());
+
+            clock.advance(java.time.Duration.ofHours(24).plusSeconds(1));
+            reg.runLifecycle();
+
+            assertEquals("REDEMPTION", reg.find("rgp-expire.xx").get().state());
         }
     }
 
