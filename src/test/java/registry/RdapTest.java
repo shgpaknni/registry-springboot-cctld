@@ -90,11 +90,35 @@ class RdapTest {
 
     @Test
     void unsupportedRdapQueryTypesReturn501() throws Exception {
-        var r = get("/rdap/domains?nsIp=192.0.2.53");
-        assertEquals(501, r.statusCode());
-        assertTrue(r.body().contains("\"errorCode\":501"), r.body());
+        assertEquals(501, get("/rdap/domains?registrant=con1").statusCode());
         assertEquals(501, get("/rdap/nameservers?ip=192.0.2.53").statusCode());
         assertEquals(501, get("/rdap/entities?unsupported=value").statusCode());
+    }
+
+    @Test
+    void domainSearchByNameserverIpv4ReturnsMatchingDomains() throws Exception {
+        reg.createHost("reg1", "ns1.example.net", List.of("192.0.2.53"), List.of());
+
+        var response = get("/rdap/domains?nsIp=192.0.2.53");
+        assertEquals(200, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"domainSearchResults\":[{"), response.body());
+        assertTrue(response.body().contains("\"ldhName\":\"alpha.xx\""), response.body());
+    }
+
+    @Test
+    void domainSearchByNameserverIpv6MatchesEquivalentPresentation() throws Exception {
+        reg.createHost("reg1", "ns1.example.net", List.of(), List.of("2001:db8::53"));
+
+        var response = get("/rdap/domains?nsIp=2001:0db8:0:0:0:0:0:53");
+        assertEquals(200, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"ldhName\":\"alpha.xx\""), response.body());
+    }
+
+    @Test
+    void domainSearchByNameserverIpRejectsMalformedAddress() throws Exception {
+        var response = get("/rdap/domains?nsIp=999.999.999.999");
+        assertEquals(400, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"errorCode\":400"), response.body());
     }
 
     @Test
@@ -107,11 +131,6 @@ class RdapTest {
         assertEquals(200, response.statusCode(), response.body());
         assertTrue(response.body().contains("\"domainSearchResults\":[{"), response.body());
         assertTrue(response.body().contains("\"ldhName\":\"byhost.xx\""), response.body());
-    }
-
-    @Test
-    void domainSearchRejectsUnsupportedSelectorStill() throws Exception {
-        assertEquals(501, get("/rdap/domains?nsIp=192.0.2.53").statusCode());
     }
 
     @Test
