@@ -1916,6 +1916,43 @@ public final class Registry {
         });
     }
 
+    /** RFC 9082 domain-by-nameserver-IP search. Supports exact IPv4 and IPv6 literals. */
+    public RdapSearchPage<DomainView> searchDomainsByNameserverIpPage(String rawAddress) {
+        byte[] expected = ipAddressBytes(rawAddress);
+        int ipVersion = expected.length == 4 ? 4 : 6;
+
+        return read(c -> {
+            List<Object[]> candidates = rows(c, """
+                    SELECT DISTINCT d.name, d.sponsor, d.registrant, d.state,
+                           d.created, d.expires, d.state_since, d.server_hold,
+                           a.address
+                    FROM domains d
+                    JOIN domain_ns n ON n.domain_name = d.name
+                    JOIN host_addresses a ON a.host_name = n.ns
+                    WHERE a.ip_version = ?
+                    ORDER BY d.name ASC
+                    """, ipVersion);
+
+            Map<String, Row> matches = new TreeMap<>();
+            for (Object[] x : candidates) {
+                byte[] actual = tryIpAddressBytes((String) x[8]);
+                if (actual != null && java.util.Arrays.equals(expected, actual)) {
+                    matches.putIfAbsent((String) x[0], new Row(
+                            (String) x[0], (String) x[1], (String) x[2], (String) x[3],
+                            num(x[4]), num(x[5]), num(x[6]), (Boolean) x[7]));
+                }
+            }
+
+            List<DomainView> out = new ArrayList<>();
+            int added = 0;
+            for (Row row : matches.values()) {
+                if (added++ >= 100) break;
+                out.add(view(c, row));
+            }
+            return new RdapSearchPage<>(out, matches.size());
+        });
+    }
+
     /** RFC 9082 nameserver-name search. RFC 8977 sort properties supported: name, registrationDate, lastChangedDate. */
     public List<RdapHostView> searchHostsByName(String rawPattern) {
         return searchHostsByNamePage(rawPattern, "name", false).results();
@@ -2016,6 +2053,38 @@ public final class Registry {
             throw new RegistryException(2005, "RDAP search patterns allow at most one asterisk");
         Names.host(pattern.replace("*", "x"));
         return pattern;
+    }
+
+    private static byte[] ipAddressBytes(String raw) {
+        byte[] parsed = raw == null ? null : tryIpAddressBytes(raw.trim());
+        if (parsed == null) {
+            throw new RegistryException(2005, "Malformed nameserver IP address");
+        }
+        return parsed;
+    }
+
+    /** Parse an IP literal without DNS lookups; return null for invalid input. */
+    private static byte[] tryIpAddressBytes(String address) {
+        if (address == null || address.isBlank() || address.indexOf('%') >= 0) return null;
+
+        if (isIpv4(address)) {
+            String[] octets = address.split("\\.");
+            byte[] bytes = new byte[4];
+            for (int i = 0; i < octets.length; i++) {
+                bytes[i] = (byte) Integer.parseInt(octets[i]);
+            }
+            return bytes;
+        }
+
+        if (address.indexOf(':') >= 0 && isIpv6(address)) {
+            try {
+                byte[] bytes = java.net.InetAddress.getByName(address).getAddress();
+                return bytes.length == 16 ? bytes : null;
+            } catch (java.net.UnknownHostException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static String entityHandleSearchPattern(String raw) {
