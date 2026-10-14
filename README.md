@@ -83,6 +83,7 @@ GET  /rdap/entities?fn={pattern}&count=true&sort=fn&cursor={cursor}
 
 EPP remains a separate TLS protocol listener because EPP is not HTTP.
 The EPP listener routes RFC 5732 host-object `check`, `create`, `info`, `update`, and `delete` commands through the registry core.
+The zone writer also publishes A/AAAA records for registered host objects beneath the configured zone; out-of-zone host addresses are not copied into this zone file.
 
 ## Architecture
 
