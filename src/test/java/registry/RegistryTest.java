@@ -46,6 +46,41 @@ class RegistryTest {
     }
 
     @Test
+    void domainCreateAndSecDnsCreateRollbackTogether() {
+        var invalidDs = List.of(new Registry.DsData(65_536, 13, 2, "AABB"));
+
+        assertEquals(2001, code(() -> reg.createDomain(
+                "reg1", "rollback-create.xx", 1, "con1", NS, "auth-secret-1",
+                invalidDs, List.of()
+        )));
+
+        assertTrue(reg.check("rollback-create.xx").available());
+        assertEquals(100_000, reg.balance("reg1"));
+    }
+
+    @Test
+    void domainUpdateAndSecDnsUpdateRollbackTogether() {
+        create("rollback-update.xx", 1);
+        var invalidDs = List.of(new Registry.DsData(65_536, 13, 2, "AABB"));
+
+        assertEquals(2001, code(() -> reg.updateDomainAndSecDns(
+                "reg1",
+                "rollback-update.xx",
+                null,
+                List.of("ns3.example.net"),
+                List.of(),
+                invalidDs,
+                List.of(),
+                List.of(),
+                List.of(),
+                false
+        )));
+
+        assertEquals(NS, reg.domainInfo("reg1", "rollback-update.xx").ns());
+        assertTrue(reg.secDnsInfo("reg1", "rollback-update.xx").dsData().isEmpty());
+    }
+
+    @Test
     void duplicateIsRejectedAndNotCharged() {
         create("alpha.xx", 1);
         assertEquals(2302, code(() -> create("ALPHA.xx.", 1)));
