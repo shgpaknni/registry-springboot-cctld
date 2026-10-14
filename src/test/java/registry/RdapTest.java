@@ -91,7 +91,7 @@ class RdapTest {
     @Test
     void unsupportedRdapQueryTypesReturn501() throws Exception {
         assertEquals(501, get("/rdap/domains?registrant=con1").statusCode());
-        assertEquals(501, get("/rdap/nameservers?ip=192.0.2.53").statusCode());
+        assertEquals(501, get("/rdap/nameservers?unsupported=value").statusCode());
         assertEquals(501, get("/rdap/entities?unsupported=value").statusCode());
     }
 
@@ -153,6 +153,41 @@ class RdapTest {
         assertTrue(r.body().contains("\"nameserverSearchResults\":[{"), r.body());
         assertTrue(r.body().contains("\"ldhName\":\"ns1.example.net\""), r.body());
         assertTrue(r.body().contains("192.0.2.53"), r.body());
+    }
+
+    @Test
+    void nameserverSearchByIpv4ReturnsMatchingNameserver() throws Exception {
+        reg.createHost("reg1", "ns-ipv4.example.net", List.of("192.0.2.53"), List.of());
+
+        var response = get("/rdap/nameservers?ip=192.0.2.53");
+        assertEquals(200, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"nameserverSearchResults\":[{"), response.body());
+        assertTrue(response.body().contains("\"ldhName\":\"ns-ipv4.example.net\""), response.body());
+        assertTrue(response.body().contains("\"v4\":[\"192.0.2.53\"]"), response.body());
+    }
+
+    @Test
+    void nameserverSearchByIpv6MatchesEquivalentPresentation() throws Exception {
+        reg.createHost("reg1", "ns-ipv6.example.net", List.of(), List.of("2001:db8::53"));
+
+        var response = get("/rdap/nameservers?ip=2001:0db8:0:0:0:0:0:53");
+        assertEquals(200, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"ldhName\":\"ns-ipv6.example.net\""), response.body());
+        assertTrue(response.body().contains("\"v6\":[\"2001:db8::53\"]"), response.body());
+    }
+
+    @Test
+    void nameserverSearchByIpRejectsMalformedAddress() throws Exception {
+        var response = get("/rdap/nameservers?ip=999.999.999.999");
+        assertEquals(400, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"errorCode\":400"), response.body());
+    }
+
+    @Test
+    void nameserverSearchByIpReturnsEmptyResultsForUnknownAddress() throws Exception {
+        var response = get("/rdap/nameservers?ip=192.0.2.254");
+        assertEquals(200, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"nameserverSearchResults\":[]"), response.body());
     }
 
     @Test
