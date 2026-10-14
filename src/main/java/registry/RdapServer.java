@@ -161,6 +161,9 @@ public final class RdapServer implements AutoCloseable {
         if (!"name".equals(p.selector()) && !byNameserver) {
             send(ex, 501, error(501, "Not Implemented", "Supported domain search selectors: name, nsLdhName.")); return;
         }
+        if (byNameserver && (!"name".equals(p.sortProperty()) || p.descending())) {
+            send(ex, 400, error(400, "Bad Request", "Domain-by-nameserver search supports only ascending name ordering.")); return;
+        }
         try {
             Registry.RdapSearchPage<Registry.DomainView> result = byNameserver
                     ? reg.searchDomainsByNameserverPage(p.value())
