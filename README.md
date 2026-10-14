@@ -77,11 +77,12 @@ GET  /rdap/domains?name={pattern}&count=true&sort=name&cursor={cursor}
 GET  /rdap/domains?nsLdhName={pattern}&count=true&cursor={cursor}
 GET  /rdap/domains?nsIp={address}&count=true&cursor={cursor}
 GET  /rdap/nameservers?name={pattern}&count=true&sort=name&cursor={cursor}
+GET  /rdap/nameservers?ip={address}&count=true&cursor={cursor}
 GET  /rdap/entities?handle={pattern}&count=true&sort=handle&cursor={cursor}
 GET  /rdap/entities?fn={pattern}&count=true&sort=fn&cursor={cursor}
 ```
 
-`count` accepts `true`, `yes`, `1`, `false`, `no`, or `0`. This bounded implementation provides cursor paging, total-count metadata, sorting metadata, and sort properties for domain name/date fields, nameserver name/date fields, and registrar entity handle/display name. It does not implement every RFC 8977 sorting property; in particular, nameserver IP-address sorting remains unsupported. Domain search by nameserver hostname (`nsLdhName`) and exact nameserver IPv4/IPv6 address (`nsIp`) is supported. Results are bounded to 100 candidates. Nameserver-based domain searches support ascending name ordering; other sort options return HTTP 400. IP search on the nameserver collection and unsupported query classes return HTTP 501. Malformed search patterns or paging/sort parameters return HTTP 400. Search results expose only registrar entity data; contact entity search is not implemented.
+`count` accepts `true`, `yes`, `1`, `false`, `no`, or `0`. This bounded implementation provides cursor paging, total-count metadata, sorting metadata, and sort properties for domain name/date fields, nameserver name/date fields, and registrar entity handle/display name. It does not implement every RFC 8977 sorting property; in particular, nameserver IP-address sorting remains unsupported. Domain search by nameserver hostname (`nsLdhName`) and exact nameserver IPv4/IPv6 address (`nsIp`) is supported. Nameserver search by exact IPv4/IPv6 address (`ip`) is also supported. Search results are bounded to 100 objects, and total-count metadata can be requested with `count=true`. Nameserver-IP searches support ascending name ordering; other sort options return HTTP 400. Unsupported query classes return HTTP 501. Malformed search patterns or paging/sort parameters return HTTP 400. Search results expose only registrar entity data; contact entity search is not implemented.
 
 EPP remains a separate TLS protocol listener because EPP is not HTTP.
 The EPP listener routes RFC 5732 host-object `check`, `create`, `info`, `update`, and `delete` commands through the registry core.

@@ -1986,6 +1986,44 @@ public final class Registry {
         });
     }
 
+    /** RFC 9082 nameserver search by exact IPv4 or IPv6 address. */
+    public RdapSearchPage<RdapHostView> searchHostsByIpPage(String rawAddress) {
+        byte[] expected = ipAddressBytes(rawAddress);
+        int ipVersion = expected.length == 4 ? 4 : 6;
+
+        return read(c -> {
+            List<Object[]> candidates = rows(c, """
+                    SELECT h.name, h.registrar_id, h.created, h.updated, a.address
+                    FROM hosts h
+                    JOIN host_addresses a ON a.host_name = h.name
+                    WHERE a.ip_version = ?
+                    ORDER BY h.name ASC
+                    """, ipVersion);
+
+            Map<String, Object[]> matches = new TreeMap<>();
+            for (Object[] x : candidates) {
+                byte[] actual = tryIpAddressBytes((String) x[4]);
+                if (actual != null && java.util.Arrays.equals(expected, actual)) {
+                    matches.putIfAbsent((String) x[0], x);
+                }
+            }
+
+            List<RdapHostView> out = new ArrayList<>();
+            int added = 0;
+            for (Object[] x : matches.values()) {
+                if (added++ >= 100) break;
+                String name = (String) x[0];
+                List<String> ipv4 = hostAddresses(c, name, 4);
+                List<String> ipv6 = hostAddresses(c, name, 6);
+                boolean linked = !rows(c,
+                        "SELECT 1 FROM domain_ns WHERE ns=? LIMIT 1", name).isEmpty();
+                out.add(new RdapHostView(name, (String) x[1], ipv4, ipv6,
+                        num(x[2]), num(x[3]), linked));
+            }
+            return new RdapSearchPage<>(out, matches.size());
+        });
+    }
+
     /** RFC 9082 registrar-entity search by handle. Contact entities are outside this supported subset. */
     public List<RdapEntityView> searchRegistrarsByHandle(String rawPattern) {
         return searchRegistrarsByHandlePage(rawPattern, "handle", false).results();

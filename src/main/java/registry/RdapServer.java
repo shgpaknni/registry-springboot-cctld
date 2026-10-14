@@ -56,7 +56,7 @@ public final class RdapServer implements AutoCloseable {
             }
             String path = ex.getRequestURI().getPath();
             if (path.equals("/rdap/help")) {
-                send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"],\"notices\":[{\"title\":\"Help\",\"description\":[\"Lookups: /rdap/domain/{name}, /rdap/nameserver/{name}, /rdap/entity/{registrar-handle}. Searches: /rdap/domains?name={pattern}, /rdap/domains?nsLdhName={pattern}, /rdap/domains?nsIp={address}, /rdap/nameservers?name={pattern}, /rdap/entities?handle={pattern} or fn={pattern}. Search queries support count, sort, and cursor on a bounded subset. Unsupported query types return 501.\"]}]}");
+                send(ex, 200, "{\"rdapConformance\":[\"rdap_level_0\"],\"notices\":[{\"title\":\"Help\",\"description\":[\"Lookups: /rdap/domain/{name}, /rdap/nameserver/{name}, /rdap/entity/{registrar-handle}. Searches: /rdap/domains?name={pattern}, /rdap/domains?nsLdhName={pattern}, /rdap/domains?nsIp={address}, /rdap/nameservers?name={pattern}, /rdap/nameservers?ip={address}, /rdap/entities?handle={pattern} or fn={pattern}. Search queries support count, sort, and cursor on a bounded subset. Unsupported query types return 501.\"]}]}");
             } else if (path.startsWith("/rdap/domain/")) {
                 domain(ex, path.substring("/rdap/domain/".length()));
             } else if (path.startsWith("/rdap/nameserver/")) {
@@ -182,11 +182,17 @@ public final class RdapServer implements AutoCloseable {
         final SearchRequest p;
         try { p = searchRequest(ex, "name"); }
         catch (RegistryException e) { send(ex, 400, error(400, "Bad Request", e.getMessage())); return; }
-        if (!"name".equals(p.selector())) {
-            send(ex, 501, error(501, "Not Implemented", "Supported nameserver search selector: name.")); return;
+        boolean byIp = "ip".equals(p.selector());
+        if (!"name".equals(p.selector()) && !byIp) {
+            send(ex, 501, error(501, "Not Implemented", "Supported nameserver search selectors: name, ip.")); return;
+        }
+        if (byIp && (!"name".equals(p.sortProperty()) || p.descending())) {
+            send(ex, 400, error(400, "Bad Request", "Nameserver IP search supports only ascending name ordering.")); return;
         }
         try {
-            Registry.RdapSearchPage<Registry.RdapHostView> result = reg.searchHostsByNamePage(p.value(), p.sortProperty(), p.descending());
+            Registry.RdapSearchPage<Registry.RdapHostView> result = byIp
+                    ? reg.searchHostsByIpPage(p.value())
+                    : reg.searchHostsByNamePage(p.value(), p.sortProperty(), p.descending());
             List<Registry.RdapHostView> page = slice(result.results(), p.offset());
             List<String> objects = new ArrayList<>();
             for (Registry.RdapHostView h : page) objects.add(withoutConformance(renderNameserver(h)));
