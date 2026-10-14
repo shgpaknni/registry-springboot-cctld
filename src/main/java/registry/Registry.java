@@ -1887,6 +1887,35 @@ public final class Registry {
         });
     }
 
+    /** RFC 9082 domain-by-nameserver-name search; pagination remains bounded by RDAP adapter. */
+    public RdapSearchPage<DomainView> searchDomainsByNameserverPage(String rawPattern) {
+        String pattern = hostSearchPattern(rawPattern);
+        String like = rdapSqlLikePattern(pattern);
+        return read(c -> {
+            long total = num(rows(c, """
+                    SELECT COUNT(DISTINCT d.name)
+                    FROM domains d
+                    JOIN domain_ns n ON n.domain_name=d.name
+                    WHERE n.ns LIKE ? ESCAPE '!'
+                    """, like).get(0)[0]);
+            List<DomainView> out = new ArrayList<>();
+            for (Object[] x : rows(c, """
+                    SELECT DISTINCT d.name,d.sponsor,d.registrant,d.state,
+                           d.created,d.expires,d.state_since,d.server_hold
+                    FROM domains d
+                    JOIN domain_ns n ON n.domain_name=d.name
+                    WHERE n.ns LIKE ? ESCAPE '!'
+                    ORDER BY d.name ASC
+                    LIMIT 100
+                    """, like)) {
+                Row row = new Row((String)x[0], (String)x[1], (String)x[2], (String)x[3],
+                        num(x[4]), num(x[5]), num(x[6]), (Boolean)x[7]);
+                out.add(view(c, row));
+            }
+            return new RdapSearchPage<>(out, total);
+        });
+    }
+
     /** RFC 9082 nameserver-name search. RFC 8977 sort properties supported: name, registrationDate, lastChangedDate. */
     public List<RdapHostView> searchHostsByName(String rawPattern) {
         return searchHostsByNamePage(rawPattern, "name", false).results();

@@ -157,11 +157,17 @@ public final class RdapServer implements AutoCloseable {
         final SearchRequest p;
         try { p = searchRequest(ex, "name"); }
         catch (RegistryException e) { send(ex, 400, error(400, "Bad Request", e.getMessage())); return; }
-        if (!"name".equals(p.selector())) {
-            send(ex, 501, error(501, "Not Implemented", "Supported domain search selector: name.")); return;
+        boolean byNameserver = "nsLdhName".equals(p.selector());
+        if (!"name".equals(p.selector()) && !byNameserver) {
+            send(ex, 501, error(501, "Not Implemented", "Supported domain search selectors: name, nsLdhName.")); return;
+        }
+        if (byNameserver && (!"name".equals(p.sortProperty()) || p.descending())) {
+            send(ex, 400, error(400, "Bad Request", "Domain-by-nameserver search supports only ascending name ordering.")); return;
         }
         try {
-            Registry.RdapSearchPage<Registry.DomainView> result = reg.searchDomainsByNamePage(p.value(), p.sortProperty(), p.descending());
+            Registry.RdapSearchPage<Registry.DomainView> result = byNameserver
+                    ? reg.searchDomainsByNameserverPage(p.value())
+                    : reg.searchDomainsByNamePage(p.value(), p.sortProperty(), p.descending());
             List<Registry.DomainView> page = slice(result.results(), p.offset());
             List<String> objects = new ArrayList<>();
             for (Registry.DomainView d : page) objects.add(withoutConformance(render(d)));
