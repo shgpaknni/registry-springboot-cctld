@@ -1038,6 +1038,18 @@ public final class Registry {
     }
 
     public DomainView createDomain(String registrar, String rawName, int years, String registrant, List<String> rawNs, String authInfo) {
+        return createDomain(registrar, rawName, years, registrant, rawNs, authInfo, null, null);
+    }
+
+    public DomainView createDomain(
+            String registrar,
+            String rawName,
+            int years,
+            String registrant,
+            List<String> rawNs,
+            String authInfo,
+            List<DsData> dsData,
+            List<DnsKeyData> dnsKeyData) {
         return tx(c -> {
             requireActive(c, registrar);
             String name = Names.check(rawName, cfg);
@@ -1084,6 +1096,12 @@ public final class Registry {
             for (String h : ns) update(c, "INSERT INTO domain_ns(domain_name,ns) VALUES(?,?)", name, h);
             audit(c, registrar, "DOMAIN_CREATE", name, years + "y");
             outbox(c, "ZONE_CHANGE", name);
+
+            // Keep domain creation and optional RFC 5910 data in one transaction.
+            if (dsData != null || dnsKeyData != null) {
+                secDnsCreate(c, registrar, name, dsData, dnsKeyData);
+            }
+
             return view(c, fetch(c, name));
         });
     }
@@ -1467,7 +1485,37 @@ public final class Registry {
             List<String> addNs,
             List<String> removeNs
     ) {
+        return tx(c -> updateDomain(c, registrar, rawName, newRegistrant, addNs, removeNs));
+    }
+
+    /** Apply RFC 5731 domain:update and RFC 5910 secDNS:update atomically. */
+    public DomainView updateDomainAndSecDns(
+            String registrar,
+            String rawName,
+            String newRegistrant,
+            List<String> addNs,
+            List<String> removeNs,
+            List<DsData> addDs,
+            List<DsData> remDs,
+            List<DnsKeyData> addKeys,
+            List<DnsKeyData> remKeys,
+            boolean removeAll
+    ) {
         return tx(c -> {
+            DomainView updated = updateDomain(c, registrar, rawName, newRegistrant, addNs, removeNs);
+            secDnsUpdate(c, registrar, rawName, addDs, remDs, addKeys, remKeys, removeAll);
+            return updated;
+        });
+    }
+
+    private DomainView updateDomain(
+            Connection c,
+            String registrar,
+            String rawName,
+            String newRegistrant,
+            List<String> addNs,
+            List<String> removeNs
+    ) throws Exception {
             requireActive(c, registrar);
 
             String name = Names.parse(rawName, cfg);
@@ -1636,9 +1684,7 @@ public final class Registry {
             }
 
             return view(c, fetch(c, name));
-        });
     }
-
 
 
     public void restoreDomain(
@@ -2407,13 +2453,15 @@ public final class Registry {
         });
     }
 
-    public void secDnsCreate(
-            String registrar,
-            String name,
-            List<DsData> ds,
-            List<DnsKeyData> keys) {
-
+    public void secDnsCreate(String registrar, String name, List<DsData> ds, List<DnsKeyData> keys) {
         tx(c -> {
+            secDnsCreate(c, registrar, name, ds, keys);
+            return null;
+        });
+    }
+
+    private void secDnsCreate(Connection c, String registrar, String name, List<DsData> ds, List<DnsKeyData> keys) throws SQLException {
+        name = Names.parse(name, cfg);
             requireActive(c, registrar);
 
             List<Object[]> domain =
@@ -2436,21 +2484,18 @@ public final class Registry {
                     "ds=" + ds.size() + ",keys=" + keys.size());
 
             outbox(c, "SECDNS", name);
+    }
 
+
+    public void secDnsUpdate(String registrar, String name, List<DsData> addDs, List<DsData> remDs, List<DnsKeyData> addKeys, List<DnsKeyData> remKeys, boolean removeAll) {
+        tx(c -> {
+            secDnsUpdate(c, registrar, name, addDs, remDs, addKeys, remKeys, removeAll);
             return null;
         });
     }
 
-    public void secDnsUpdate(
-            String registrar,
-            String name,
-            List<DsData> addDs,
-            List<DsData> remDs,
-            List<DnsKeyData> addKeys,
-            List<DnsKeyData> remKeys,
-            boolean removeAll) {
-
-        tx(c -> {
+    private void secDnsUpdate(Connection c, String registrar, String name, List<DsData> addDs, List<DsData> remDs, List<DnsKeyData> addKeys, List<DnsKeyData> remKeys, boolean removeAll) throws SQLException {
+        name = Names.parse(name, cfg);
             requireActive(c, registrar);
 
             List<Object[]> domain =
@@ -2512,10 +2557,8 @@ public final class Registry {
                             + ",all=" + removeAll);
 
             outbox(c, "SECDNS", name);
-
-            return null;
-        });
     }
+
 
     private void insertSecDns(
             Connection c,
