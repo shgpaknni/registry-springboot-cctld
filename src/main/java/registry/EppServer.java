@@ -542,25 +542,31 @@ public final class EppServer implements AutoCloseable {
             }
         }
         Element ai = kid(obj, "authInfo");
-        Registry.DomainView v = reg.createDomain(st.registrar, need(obj, "name"), period(obj), need(obj, "registrant"), ns,
-                ai == null ? null : text(ai, "pw"));
+        List<Registry.DsData> dsData = null;
+        List<Registry.DnsKeyData> dnsKeyData = null;
+
         if (ext != null) {
             for (Element e : kids(ext)) {
-
-                if (!NS_SECDNS.equals(e.getNamespaceURI()))
+                if (!NS_SECDNS.equals(e.getNamespaceURI())
+                        || !"create".equals(e.getLocalName())) {
                     continue;
-
-                if (!"create".equals(e.getLocalName()))
-                    continue;
-
-                reg.secDnsCreate(
-                        st.registrar,
-                        need(obj, "name"),
-                        parseSecDnsDs(e),
-                        parseSecDnsKeys(e)
-                );
+                }
+                dsData = parseSecDnsDs(e);
+                dnsKeyData = parseSecDnsKeys(e);
+                break;
             }
         }
+
+        Registry.DomainView v = reg.createDomain(
+                st.registrar,
+                need(obj, "name"),
+                period(obj),
+                need(obj, "registrant"),
+                ns,
+                ai == null ? null : text(ai, "pw"),
+                dsData,
+                dnsKeyData
+        );
 
         String body = "<resData><domain:creData xmlns:domain=\"" + NS_DOMAIN + "\"><domain:name>" + esc(v.name()) + "</domain:name>"
                 + "<domain:crDate>" + date(v.created()) + "</domain:crDate><domain:exDate>" + date(v.expires()) + "</domain:exDate></domain:creData></resData>";
@@ -856,7 +862,30 @@ public final class EppServer implements AutoCloseable {
             );
         }
 
-        if (domainChanged) {
+        if (domainChanged && secDnsChanged) {
+            Element secAdd = kid(secDnsUpdate, "add");
+            Element secRem = kid(secDnsUpdate, "rem");
+
+            boolean removeAll =
+                    secRem != null &&
+                    (
+                        kid(secRem, "allData") != null ||
+                        kid(secRem, "all") != null
+                    );
+
+            reg.updateDomainAndSecDns(
+                    st.registrar,
+                    need(obj, "name"),
+                    registrant,
+                    addNs,
+                    removeNs,
+                    parseSecDnsDs(secAdd),
+                    parseSecDnsDs(secRem),
+                    parseSecDnsKeys(secAdd),
+                    parseSecDnsKeys(secRem),
+                    removeAll
+            );
+        } else if (domainChanged) {
             reg.updateDomain(
                     st.registrar,
                     need(obj, "name"),
@@ -864,9 +893,7 @@ public final class EppServer implements AutoCloseable {
                     addNs,
                     removeNs
             );
-        }
-
-        if (secDnsChanged) {
+        } else if (secDnsChanged) {
             Element secAdd = kid(secDnsUpdate, "add");
             Element secRem = kid(secDnsUpdate, "rem");
 
