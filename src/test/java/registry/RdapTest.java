@@ -98,6 +98,23 @@ class RdapTest {
     }
 
     @Test
+    void domainSearchByNameserverNameReturnsDomainsUsingThatHost() throws Exception {
+        reg.createHost("reg1", "ns1.example.net", List.of("192.0.2.53"), List.of());
+        reg.createDomain("reg1", "byhost.xx", 1, "con1",
+                List.of("ns1.example.net", "ns2.example.net"), "auth-secret-2");
+
+        var response = get("/rdap/domains?nsLdhName=ns1.example*.net");
+        assertEquals(200, response.statusCode(), response.body());
+        assertTrue(response.body().contains("\"domainSearchResults\":[{"), response.body());
+        assertTrue(response.body().contains("\"ldhName\":\"byhost.xx\""), response.body());
+    }
+
+    @Test
+    void domainSearchRejectsUnsupportedSelectorStill() throws Exception {
+        assertEquals(501, get("/rdap/domains?nsIp=192.0.2.53").statusCode());
+    }
+
+    @Test
     void domainSearchSupportsExactAndPartialNames() throws Exception {
         var r = get("/rdap/domains?name=alpha*.xx");
         assertEquals(200, r.statusCode(), r.body());
