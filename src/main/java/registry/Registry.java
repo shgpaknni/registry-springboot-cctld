@@ -2157,6 +2157,45 @@ public final class Registry {
     }
 
 
+    /** Address records for host objects beneath this configured zone, used for glue publication. */
+    public SortedMap<String, HostAddresses> zoneHostAddresses() {
+        String suffix = "." + cfg.zone();
+        return read(c -> {
+            SortedMap<String, HostAddresses> result = new TreeMap<>();
+            for (Object[] row : rows(c, """
+                    SELECT h.name, a.address, a.ip_version
+                    FROM hosts h
+                    JOIN host_addresses a ON a.host_name = h.name
+                    ORDER BY h.name, a.ip_version, a.address
+                    """)) {
+                String name = (String) row[0];
+                if (!name.equals(cfg.zone()) && !name.endsWith(suffix)) {
+                    continue; // Never publish out-of-zone host addresses in this zone file.
+                }
+                String address = (String) row[1];
+                int version = ((Number) row[2]).intValue();
+                HostAddresses prior = result.getOrDefault(name,
+                        new HostAddresses(List.of(), List.of()));
+                List<String> ipv4 = new ArrayList<>(prior.ipv4());
+                List<String> ipv6 = new ArrayList<>(prior.ipv6());
+                if (version == 4) {
+                    ipv4.add(address);
+                } else if (version == 6) {
+                    ipv6.add(address);
+                }
+                result.put(name, new HostAddresses(ipv4, ipv6));
+            }
+            return result;
+        });
+    }
+
+    public record HostAddresses(List<String> ipv4, List<String> ipv6) {
+        public HostAddresses {
+            ipv4 = List.copyOf(ipv4);
+            ipv6 = List.copyOf(ipv6);
+        }
+    }
+
     /** DS records that belong in the parent zone: active delegations not on serverHold. */
     public SortedMap<String, List<DsData>> zoneDsEntries() {
         return read(c -> {

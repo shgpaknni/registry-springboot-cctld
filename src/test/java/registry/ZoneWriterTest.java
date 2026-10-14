@@ -57,6 +57,22 @@ class ZoneWriterTest {
     }
 
     @Test
+    void publishesGlueForInZoneHostObjectsOnly() throws Exception {
+        reg.createHost("reg1", "ns1.xx", List.of("192.0.2.10"), List.of("2001:db8::10"));
+        reg.createHost("reg1", "ns2.xx", List.of("192.0.2.11"), List.of());
+        reg.createHost("reg1", "ns.external.net", List.of("198.51.100.9"), List.of());
+
+        Path file = tempDir.resolve("zone-glue.db");
+        writer(file, null).write();
+        String zone = Files.readString(file, StandardCharsets.UTF_8);
+
+        assertTrue(zone.contains("ns1 IN A 192.0.2.10"), zone);
+        assertTrue(zone.contains("ns1 IN AAAA 2001:db8::10"), zone);
+        assertTrue(zone.contains("ns2 IN A 192.0.2.11"), zone);
+        assertFalse(zone.contains("198.51.100.9"), zone);
+    }
+
+    @Test
     void incrementsSoaSerialWhenRegeneratingSameSecond() throws Exception {
         Path file = tempDir.resolve("zone.db");
         ZoneWriter writer = writer(file, null);

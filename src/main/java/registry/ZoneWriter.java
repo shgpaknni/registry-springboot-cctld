@@ -164,6 +164,18 @@ public final class ZoneWriter {
             }
         }
 
+        // Publish A/AAAA records for in-zone host objects; these are the glue records for delegations.
+        for (Map.Entry<String, Registry.HostAddresses> entry : reg.zoneHostAddresses().entrySet()) {
+            String owner = relativeName(entry.getKey(), reg.config().zone());
+            Registry.HostAddresses addresses = entry.getValue();
+            for (String address : addresses.ipv4()) {
+                sb.append(owner).append(" IN A ").append(address).append('\n');
+            }
+            for (String address : addresses.ipv6()) {
+                sb.append(owner).append(" IN AAAA ").append(address).append('\n');
+            }
+        }
+
         // Child DS RRsets are authoritative on the parent side of each delegation.
         for (Map.Entry<String, List<Registry.DsData>> entry : reg.zoneDsEntries().entrySet()) {
             String label = Names.label(entry.getKey(), reg.config());
@@ -177,6 +189,15 @@ public final class ZoneWriter {
             }
         }
         return sb.toString();
+    }
+
+    private static String relativeName(String host, String zone) {
+        String normalizedHost = host.toLowerCase(Locale.ROOT);
+        String suffix = "." + zone.toLowerCase(Locale.ROOT);
+        if (!normalizedHost.endsWith(suffix)) {
+            throw new IllegalArgumentException("Glue host is outside configured zone: " + host);
+        }
+        return normalizedHost.substring(0, normalizedHost.length() - suffix.length());
     }
 
     /** 32-bit SOA serial using RFC 1982 serial arithmetic relative to the currently published file. */
